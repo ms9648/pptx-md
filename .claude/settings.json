@@ -7,7 +7,10 @@
       "Bash(gh pr review:*)", "Bash(gh pr view:*)", "Bash(gh pr list:*)",
       "Bash(git checkout:*)", "Bash(git add:*)", "Bash(git commit:*)",
       "Bash(git push origin:*)",
-      "Bash(./gradlew test:*)", "Bash(npm test:*)", "Bash(npm run build:*)"
+      "Bash(pytest:*)",
+      "Bash(hatch build:*)",
+      "Bash(ruff check:*)", "Bash(black --check:*)",
+      "Bash(mypy src/:*)"
     ],
     "deny": [
       "Bash(git push origin main:*)",
