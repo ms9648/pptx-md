@@ -192,28 +192,60 @@ def pptx_with_image(tmp_path: Path) -> bytes:
 
 
 @pytest.fixture
-def pptx_with_group(tmp_path: Path) -> bytes:
-    """Single slide with a group containing two text shapes.
+def pptx_with_group() -> bytes:
+    """Single slide with a group shape containing one text child.
 
-    Uses python-pptx GroupShapes API to create nested group.
+    Uses XML direct assembly because python-pptx 1.0.2 does not expose
+    group_shapes().  The resulting PPTX is valid and python-pptx can
+    read it back with shape_type == MSO_SHAPE_TYPE.GROUP.
+
     Used for: FR-04 AC4.
     """
+    from lxml import etree  # noqa: PLC0415 — local import keeps top-level clean
+
     prs = PptxPresentation()
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    slide = prs.slides.add_slide(prs.slide_layouts[6])  # Blank
+    sp_tree = slide.shapes._spTree
 
-    # Add two text boxes, then group them
-    tb1 = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(2), Inches(1))
-    tb1.text_frame.text = "Child text 1"
-    tb2 = slide.shapes.add_textbox(Inches(3), Inches(1), Inches(2), Inches(1))
-    tb2.text_frame.text = "Child text 2"
-
-    # Group via GroupShapes — python-pptx exposes this on shapes
-    try:
-        slide.shapes.group_shapes([tb1, tb2])
-    except AttributeError:
-        # Some python-pptx versions don't have group_shapes; skip grouping
-        # The test will still create valid PPTX with individual text boxes
-        pass
+    # Manually build a grpSp element with one text child.
+    grp_xml = (
+        "<p:grpSp"
+        ' xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"'
+        ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+        ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        "<p:nvGrpSpPr>"
+        '<p:cNvPr id="10" name="Group 1"/>'
+        "<p:cNvGrpSpPr/>"
+        "<p:nvPr/>"
+        "</p:nvGrpSpPr>"
+        "<p:grpSpPr>"
+        "<a:xfrm>"
+        '<a:off x="0" y="0"/><a:ext cx="6858000" cy="4572000"/>'
+        '<a:chOff x="0" y="0"/><a:chExt cx="6858000" cy="4572000"/>'
+        "</a:xfrm>"
+        "</p:grpSpPr>"
+        "<p:sp>"
+        "<p:nvSpPr>"
+        '<p:cNvPr id="11" name="TextInGroup"/>'
+        '<p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr>'
+        "<p:nvPr/>"
+        "</p:nvSpPr>"
+        "<p:spPr>"
+        "<a:xfrm>"
+        '<a:off x="914400" y="914400"/>'
+        '<a:ext cx="2743200" cy="914400"/>'
+        "</a:xfrm>"
+        '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
+        "</p:spPr>"
+        "<p:txBody>"
+        "<a:bodyPr/><a:lstStyle/>"
+        "<a:p><a:r><a:t>child text</a:t></a:r></a:p>"
+        "</p:txBody>"
+        "</p:sp>"
+        "</p:grpSp>"
+    )
+    grp_elem = etree.fromstring(grp_xml)
+    sp_tree.append(grp_elem)
 
     return _save_to_bytes(prs)
 

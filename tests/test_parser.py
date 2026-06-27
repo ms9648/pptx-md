@@ -293,11 +293,16 @@ class TestFR04ShapeParsingAC3:
     def test_ac3_content_type_추출(
         self, pptx_with_image: bytes, tmp_path: Path
     ) -> None:
-        """AC3: image_format 이 추출된다 (예: 'png')."""
+        """AC3: image_format 이 추출된다 (예: 'png'), content_type 이 비어있지 않다."""
         pres = _parse_bytes(pptx_with_image, tmp_path)
         img = [s for s in pres.slides[0].shapes if isinstance(s, ImageShapeIR)][0]
-        assert img.image_format != ""
+        assert img.image_format != "", "image_format 이 빈 문자열이어서는 안 된다"
         assert isinstance(img.image_format, str)
+        # content_type 이 이미지 포맷을 포함해야 한다 (예: "png", "jpeg" 등)
+        known_formats = {"png", "jpeg", "jpg", "gif", "bmp", "tiff", "wmf", "emf"}
+        assert (
+            img.image_format in known_formats
+        ), f"image_format '{img.image_format}' 이 알려진 이미지 포맷이어야 한다"
 
     def test_ac3_확장_슬롯_none(self, pptx_with_image: bytes, tmp_path: Path) -> None:
         """AC3: v1 파서는 classification, description 을 None 으로 둔다 (ADR-205)."""
@@ -308,56 +313,126 @@ class TestFR04ShapeParsingAC3:
 
 
 class TestFR04ShapeParsingAC4:
-    """AC4: 그룹 도형 — GroupShapeIR, 자식 재귀 파싱."""
+    """AC4: 그룹 도형 — GroupShapeIR, 자식 재귀 파싱.
+
+    Fixtures use XML direct assembly (python-pptx 1.0.2 lacks group_shapes()).
+    All tests go through parse_presentation() end-to-end so _parse_group
+    is exercised in coverage.
+    """
 
     def test_ac4_그룹_도형_GroupShapeIR(
         self, pptx_with_group: bytes, tmp_path: Path
     ) -> None:
-        """AC4: GROUP 도형이 GroupShapeIR 로 파싱된다."""
+        """AC4: GROUP 도형이 GroupShapeIR 로 파싱된다 (_parse_group 실행 검증)."""
         pres = _parse_bytes(pptx_with_group, tmp_path)
         slide = pres.slides[0]
 
-        # 그룹이 없으면 개별 텍스트 박스들이 있을 수 있음 (group_shapes 미지원 시)
         group_shapes = [s for s in slide.shapes if isinstance(s, GroupShapeIR)]
-        text_shapes = [s for s in slide.shapes if isinstance(s, TextShapeIR)]
+        assert (
+            len(group_shapes) == 1
+        ), "XML 직접 조립으로 생성한 grpSp 가 GroupShapeIR 로 파싱되어야 한다"
+        assert group_shapes[0].kind == ShapeKind.GROUP
 
-        # 그룹이 생성됐으면 GroupShapeIR, 아니면 TextShapeIR 2개
-        assert len(group_shapes) >= 1 or len(text_shapes) >= 2
+    def test_ac4_그룹_자식_텍스트_파싱(
+        self, pptx_with_group: bytes, tmp_path: Path
+    ) -> None:
+        """AC4: 그룹 내 자식 텍스트 도형이 children 에 포함된다."""
+        pres = _parse_bytes(pptx_with_group, tmp_path)
+        slide = pres.slides[0]
 
-    def test_ac4_중첩_그룹_재귀_파싱(self, tmp_path: Path) -> None:
-        """AC4: 그룹 안 그룹도 GroupShapeIR.children 으로 재귀 파싱된다."""
-        # 직접 PPTX 를 수동으로 만들어서 그룹 중첩 구조 확인
-        # python-pptx 의 group_shapes 는 버전에 따라 동작이 다를 수 있으므로
-        # GroupShapeIR 의 자식 파싱이 올바른지 테스트한다
-        from pptx_md.ir import (  # noqa: PLC0415
-            GroupShapeIR,
-            ParagraphIR,
-            ShapeKind,
-            TextShapeIR,
-        )
+        group_shapes = [s for s in slide.shapes if isinstance(s, GroupShapeIR)]
+        assert len(group_shapes) == 1
+        grp = group_shapes[0]
 
-        # GroupShapeIR 를 직접 생성해서 트리 구조 검증
-        inner_text = TextShapeIR(
-            shape_id=1,
-            name="t1",
-            kind=ShapeKind.TEXT,
-            paragraphs=[ParagraphIR(text="inner", level=0)],
-        )
-        inner_group = GroupShapeIR(
-            shape_id=2,
-            name="g1",
-            kind=ShapeKind.GROUP,
-            children=[inner_text],
-        )
-        outer_group = GroupShapeIR(
-            shape_id=3,
-            name="g2",
-            kind=ShapeKind.GROUP,
-            children=[inner_group],
-        )
+        # 자식이 최소 1개 이상 있어야 한다
+        assert len(grp.children) >= 1
 
-        assert isinstance(outer_group.children[0], GroupShapeIR)
-        assert isinstance(outer_group.children[0].children[0], TextShapeIR)
+        # 자식 중 TextShapeIR 가 있고, 텍스트 내용이 보존되어야 한다
+        text_children = [c for c in grp.children if isinstance(c, TextShapeIR)]
+        assert len(text_children) >= 1
+        all_texts = " ".join(p.text for c in text_children for p in c.paragraphs)
+        assert "child text" in all_texts
+
+    def test_ac4_중첩_그룹_재귀_파싱_end_to_end(self, tmp_path: Path) -> None:
+        """AC4: 그룹 안 그룹도 GroupShapeIR.children 으로 재귀 파싱된다 (end-to-end).
+
+        XML 직접 조립으로 outer > inner > text 3단 중첩 구조를 만들어
+        parse_presentation() 가 재귀 파싱하는지 검증한다.
+        """
+        from lxml import etree  # noqa: PLC0415
+
+        prs = PptxPresentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        sp_tree = slide.shapes._spTree
+
+        # outer group contains inner group which contains a text shape
+        nested_xml = (
+            "<p:grpSp"
+            ' xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"'
+            ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+            "<p:nvGrpSpPr>"
+            '<p:cNvPr id="20" name="OuterGroup"/>'
+            "<p:cNvGrpSpPr/><p:nvPr/>"
+            "</p:nvGrpSpPr>"
+            "<p:grpSpPr>"
+            "<a:xfrm>"
+            '<a:off x="0" y="0"/><a:ext cx="1" cy="1"/>'
+            '<a:chOff x="0" y="0"/><a:chExt cx="1" cy="1"/>'
+            "</a:xfrm>"
+            "</p:grpSpPr>"
+            # inner group
+            "<p:grpSp>"
+            "<p:nvGrpSpPr>"
+            '<p:cNvPr id="21" name="InnerGroup"/>'
+            "<p:cNvGrpSpPr/><p:nvPr/>"
+            "</p:nvGrpSpPr>"
+            "<p:grpSpPr>"
+            "<a:xfrm>"
+            '<a:off x="0" y="0"/><a:ext cx="1" cy="1"/>'
+            '<a:chOff x="0" y="0"/><a:chExt cx="1" cy="1"/>'
+            "</a:xfrm>"
+            "</p:grpSpPr>"
+            # leaf text shape
+            "<p:sp>"
+            "<p:nvSpPr>"
+            '<p:cNvPr id="22" name="DeepText"/>'
+            "<p:cNvSpPr/><p:nvPr/>"
+            "</p:nvSpPr>"
+            "<p:spPr>"
+            "<a:xfrm>"
+            '<a:off x="0" y="0"/><a:ext cx="1" cy="1"/>'
+            "</a:xfrm>"
+            '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
+            "</p:spPr>"
+            "<p:txBody>"
+            "<a:bodyPr/><a:lstStyle/>"
+            "<a:p><a:r><a:t>deep text</a:t></a:r></a:p>"
+            "</p:txBody>"
+            "</p:sp>"
+            "</p:grpSp>"
+            "</p:grpSp>"
+        )
+        sp_tree.append(etree.fromstring(nested_xml))
+
+        buf = io.BytesIO()
+        prs.save(buf)
+        p = tmp_path / "nested_group.pptx"
+        p.write_bytes(buf.getvalue())
+
+        pres = parse_presentation(p)
+        slide_ir = pres.slides[0]
+
+        outer_groups = [s for s in slide_ir.shapes if isinstance(s, GroupShapeIR)]
+        assert len(outer_groups) == 1, "최상위 그룹이 1개 파싱되어야 한다"
+
+        outer = outer_groups[0]
+        inner_groups = [c for c in outer.children if isinstance(c, GroupShapeIR)]
+        assert len(inner_groups) == 1, "중첩 그룹이 children 에 포함되어야 한다"
+
+        inner = inner_groups[0]
+        text_children = [c for c in inner.children if isinstance(c, TextShapeIR)]
+        assert len(text_children) == 1
+        assert "deep text" in text_children[0].paragraphs[0].text
 
 
 class TestFR04ShapeParsingAC5:
