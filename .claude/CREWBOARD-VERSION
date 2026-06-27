@@ -1,0 +1,4 @@
+# Crewboard 스캐폴딩 버전 — /cb:version-update 가 읽고 갱신한다. 수동 편집 금지.
+version: 1.11
+source: https://github.com/julio-kim/crewboard
+bootstrapped: 2026-06-27
