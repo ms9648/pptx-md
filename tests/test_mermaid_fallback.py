@@ -135,37 +135,49 @@ class TestAc3WideTableMermaid:
 
 
 class TestAc4RepeatedRowsMermaid:
-    """ac4_연속반복행_mermaid발동"""
+    """ac4_행내인접반복셀_mermaid발동"""
 
-    def test_ac4_identical_consecutive_rows_triggers_fallback(self) -> None:
-        """Two consecutive identical non-empty rows -> is_complex_table=True."""
-        rows = [
-            ["Header1", "Header2"],
-            ["Value", "Same"],
-            ["Value", "Same"],  # identical to previous -> merge heuristic
-        ]
-        table = _make_table(rows, n_rows=3, n_cols=2)
+    def test_ac4_intrarow_adjacent_duplicate_nonempty_triggers_fallback(self) -> None:
+        """Row with adjacent identical non-empty cells -> is_complex_table=True.
+
+        AC4 example: ["병합", "병합", "x"] has two adjacent "병합" cells.
+        """
+        rows = [["병합", "병합", "x"]]
+        table = _make_table(rows, n_rows=1, n_cols=3)
         assert is_complex_table(table)
 
-    def test_ac4_non_repeated_rows_not_triggered(self) -> None:
-        """Distinct rows -> NOT triggered by repetition heuristic."""
+    def test_ac4_no_adjacent_duplicates_not_triggered(self) -> None:
+        """Row with no adjacent duplicate cells -> NOT triggered by heuristic."""
+        rows = [["a", "b", "c"]]
+        table = _make_table(rows, n_rows=1, n_cols=3)
+        # 1*3=3 cells, 3 cols, no adjacent duplicates
+        assert not is_complex_table(table)
+
+    def test_ac4_empty_cells_not_counted_as_duplicate(self) -> None:
+        """Adjacent empty cells do NOT trigger fallback (empty cells excluded)."""
+        rows = [["", "", "x"]]
+        table = _make_table(rows, n_rows=1, n_cols=3)
+        # empty cells are excluded from intra-row repetition check
+        assert not is_complex_table(table)
+
+    def test_ac4_multirow_one_row_has_duplicate_triggers(self) -> None:
+        """Multi-row table where one row has adjacent duplicate -> True."""
+        rows = [
+            ["Header1", "Header2", "Header3"],
+            ["병합", "병합", "x"],
+        ]
+        table = _make_table(rows, n_rows=2, n_cols=3)
+        assert is_complex_table(table)
+
+    def test_ac4_all_distinct_multirow_not_triggered(self) -> None:
+        """Multi-row table with all distinct adjacent cells -> NOT triggered."""
         rows = [
             ["Header1", "Header2"],
             ["A", "B"],
             ["C", "D"],
         ]
         table = _make_table(rows, n_rows=3, n_cols=2)
-        # 3*2=6 cells, 2 cols, no repeated rows
-        assert not is_complex_table(table)
-
-    def test_ac4_empty_repeated_rows_not_triggered(self) -> None:
-        """Consecutive rows where ALL cells are empty do NOT trigger fallback."""
-        rows = [
-            ["", ""],
-            ["", ""],
-        ]
-        table = _make_table(rows, n_rows=2, n_cols=2)
-        # empty rows don't count as merge heuristic
+        # 3*2=6 cells, 2 cols, no intra-row adjacent duplicates
         assert not is_complex_table(table)
 
 

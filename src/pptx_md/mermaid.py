@@ -80,11 +80,11 @@ def is_complex_table(table: TableShapeIR) -> bool:
         )
         return True
 
-    # Condition 3: consecutive rows with identical non-empty text in any column
-    # (merged-cell heuristic — python-pptx repeats merged cell text)
-    if _has_repeated_consecutive_rows(table):
+    # Condition 3: intra-row adjacent repeated non-empty cells
+    # (merged-cell heuristic — python-pptx repeats merged cell text within a row)
+    if _has_intrarow_repeated_cells(table):
         _logger.debug(
-            "is_complex_table: shape_id=%d repeated-consecutive-rows detected",
+            "is_complex_table: shape_id=%d intra-row repeated cells detected",
             table.shape_id,
         )
         return True
@@ -92,22 +92,24 @@ def is_complex_table(table: TableShapeIR) -> bool:
     return False
 
 
-def _has_repeated_consecutive_rows(table: TableShapeIR) -> bool:
-    """Return True if any non-empty row appears identically in two consecutive rows.
+def _has_intrarow_repeated_cells(table: TableShapeIR) -> bool:
+    """Return True if any row has adjacent cells with the same non-empty text.
 
-    A "row" here means the tuple of all cell texts in that row.  We check
-    whether the same non-empty tuple appears in row[i] and row[i+1].
+    Checks each row for consecutive cell pairs where both cells share an
+    identical non-empty string — a heuristic for horizontally merged cells
+    that python-pptx expands by repeating the text (ARCH-M2 §11 debt).
+
+    Examples:
+        ["병합", "병합", "x"] -> True  (adjacent duplicate non-empty cells)
+        ["a", "b", "c"]       -> False (no adjacent duplicates)
+        ["", "", "x"]         -> False (empty cells are excluded)
     """
-    if table.n_rows < 2:
-        return False
-
-    rows = table.rows
-    for i in range(len(rows) - 1):
-        row_a = rows[i]
-        row_b = rows[i + 1]
-        # Rows must be equal, non-empty (at least one non-blank cell)
-        if row_a == row_b and any(cell.strip() for cell in row_a):
-            return True
+    for row in table.rows:
+        for j in range(len(row) - 1):
+            cell_a = row[j].strip()
+            cell_b = row[j + 1].strip()
+            if cell_a and cell_a == cell_b:
+                return True
     return False
 
 
