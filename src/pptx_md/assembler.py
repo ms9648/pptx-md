@@ -12,7 +12,7 @@ Design constraints (ADR-218):
     - Partial-failure isolation: one shape failure does not abort the slide/document.
     - No VLM/python-pptx/Pillow imports (NFR-08).
     - Uses mermaid.is_complex_table() for FR-13 Mermaid fallback.
-    - masking=None means no masking (opt-in, FR-15 — masking.py integration point).
+    - masking=None means no masking (opt-in, FR-15).
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from pptx_md.ir import (
     TableShapeIR,
     TextShapeIR,
 )
+from pptx_md.masking import MaskingOptions, mask_text
 from pptx_md.mermaid import is_complex_table, table_to_mermaid
 
 __all__ = ["assemble_slide", "assemble_document"]
@@ -52,7 +53,7 @@ _SLIDE_SEPARATOR: str = "\n\n---\n\n"
 def assemble_slide(
     slide: SlideIR,
     *,
-    masking: object | None = None,
+    masking: MaskingOptions | None = None,
 ) -> str:
     """Render one SlideIR into a deterministic Markdown block (FR-11).
 
@@ -61,7 +62,7 @@ def assemble_slide(
 
     Args:
         slide: A SlideIR instance (read-only).
-        masking: Optional MaskingOptions instance (FR-15, currently unused stub).
+        masking: Optional MaskingOptions instance (FR-15).
 
     Returns:
         A Markdown string representing this slide.  Empty/blank slides return
@@ -73,7 +74,7 @@ def assemble_slide(
 def assemble_document(
     presentation: PresentationIR,
     *,
-    masking: object | None = None,
+    masking: MaskingOptions | None = None,
 ) -> str:
     """Map-Reduce assembly of the whole presentation into one document (FR-12).
 
@@ -83,7 +84,7 @@ def assemble_document(
 
     Args:
         presentation: A PresentationIR instance (read-only).
-        masking: Optional MaskingOptions instance (FR-15, currently unused stub).
+        masking: Optional MaskingOptions instance (FR-15).
 
     Returns:
         A single Markdown document string.
@@ -114,7 +115,7 @@ def assemble_document(
 # ---------------------------------------------------------------------------
 
 
-def _render_slide(slide: SlideIR, masking: object | None) -> str:
+def _render_slide(slide: SlideIR, masking: MaskingOptions | None) -> str:
     """Render a single SlideIR to Markdown."""
     parts: list[str] = []
 
@@ -134,7 +135,7 @@ def _render_slide(slide: SlideIR, masking: object | None) -> str:
     return "\n\n".join(parts)
 
 
-def _render_shape(shape: ShapeIR, masking: object | None) -> str:
+def _render_shape(shape: ShapeIR, masking: MaskingOptions | None) -> str:
     """Dispatch to the appropriate renderer; isolate per-shape failures (ADR-220)."""
     try:
         if isinstance(shape, TextShapeIR):
@@ -164,14 +165,14 @@ def _render_shape(shape: ShapeIR, masking: object | None) -> str:
         return ""
 
 
-def _render_text(shape: TextShapeIR, masking: object | None) -> str:
+def _render_text(shape: TextShapeIR, masking: MaskingOptions | None) -> str:
     """Render a TextShapeIR to Markdown paragraphs / indented bullets (AC1, AC2)."""
     lines: list[str] = []
     for para in shape.paragraphs:
         text = para.text
-        # Apply masking if provided (FR-15 integration — stub for now)
+        # Apply masking if provided (FR-15)
         if masking is not None:
-            text = _apply_masking(text, masking)
+            text = mask_text(text, masking)
 
         if para.level > 0:
             # Indented bullet item (AC2: level=1 deeper than level=0)
@@ -212,7 +213,7 @@ def _render_table(shape: TableShapeIR) -> str:
     return "\n".join(table_lines)
 
 
-def _render_image(shape: ImageShapeIR, masking: object | None) -> str:
+def _render_image(shape: ImageShapeIR, masking: MaskingOptions | None) -> str:
     """Render an ImageShapeIR according to M3/M4 slot priority (AC4, AC5, §3.4).
 
     Priority (first match):
@@ -229,17 +230,14 @@ def _render_image(shape: ImageShapeIR, masking: object | None) -> str:
         # AC4: description present -> description text block (no placeholder)
         text = description
         if masking is not None:
-            text = _apply_masking(text, masking)
+            text = mask_text(text, masking)
         if classification is not None:
             return f"{text}\n\n_[{classification} image]_"
         return text
 
     # AC5: description=None -> alt_text image syntax
     if alt_text:
-        if masking is not None:
-            masked_alt = _apply_masking(alt_text, masking)
-        else:
-            masked_alt = alt_text
+        masked_alt = mask_text(alt_text, masking) if masking is not None else alt_text
         return f"![{masked_alt}](...)"
 
     if classification is not None:
@@ -248,7 +246,7 @@ def _render_image(shape: ImageShapeIR, masking: object | None) -> str:
     return "_[image]_"
 
 
-def _render_group(shape: GroupShapeIR, masking: object | None) -> str:
+def _render_group(shape: GroupShapeIR, masking: MaskingOptions | None) -> str:
     """Render a GroupShapeIR by recursively rendering children in order (AC6)."""
     child_parts: list[str] = []
     for child in shape.children:
@@ -258,42 +256,12 @@ def _render_group(shape: GroupShapeIR, masking: object | None) -> str:
     return "\n\n".join(child_parts)
 
 
-def _render_other(shape: OtherShapeIR, masking: object | None) -> str:
+def _render_other(shape: OtherShapeIR, masking: MaskingOptions | None) -> str:
     """Render an OtherShapeIR: non-empty fallback_text -> paragraph, else skip (AC8)."""
     if not shape.fallback_text:
         # AC8: empty fallback_text -> silently omit
         return ""
     text = shape.fallback_text
     if masking is not None:
-        text = _apply_masking(text, masking)
-    return text
-
-
-# ---------------------------------------------------------------------------
-# Masking integration stub (FR-15 — masking.py not yet part of this issue)
-# ---------------------------------------------------------------------------
-
-
-def _apply_masking(text: str, masking: object) -> str:
-    """Apply masking if the masking object exposes a mask_text interface.
-
-    Forward-compatible stub for FR-15 (#37).  When masking.py is available and
-    ``masking.enabled`` is True, delegates to ``masking.mask_text``.
-    Returns *text* unchanged if masking is disabled or masking.py is not installed.
-    """
-    enabled = getattr(masking, "enabled", False)
-    if not enabled:
-        return text
-    # Delegate to masking.mask_text when masking.py is available (FR-15 #37).
-    # importlib.import_module avoids a hard dependency that mypy would flag when
-    # masking.py does not yet exist in the type-checked source tree.
-    import importlib  # noqa: PLC0415
-
-    try:
-        mod = importlib.import_module("pptx_md.masking")
-        mask_fn = getattr(mod, "mask_text", None)
-        if callable(mask_fn):
-            return str(mask_fn(text, masking))
-    except ImportError:
-        pass
+        text = mask_text(text, masking)
     return text
