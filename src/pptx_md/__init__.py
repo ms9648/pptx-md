@@ -1,13 +1,48 @@
 """pptx-md — Convert PPTX files into LLM-friendly Markdown.
 
-Public API re-exports go here as modules land in later milestones, e.g.:
+Public API (FR-16, ADR-603):
 
-    # M6 / FR-16:
-    # from pptx_md.api import convert, ConvertOptions
-    # __all__ = ["convert", "ConvertOptions"]
+    from pptx_md import convert, ConvertOptions
 
-Until then this module only guarantees that ``import pptx_md`` succeeds
-(FR-01 AC2). Internal submodules must not be exposed directly (skill §1).
+    md = convert("deck.pptx")
+
+    # With options:
+    from pptx_md import ConvertOptions, MaskingOptions, get_describer
+    opts = ConvertOptions(
+        describer=get_describer("anthropic", api_key="..."),
+        masking=MaskingOptions(enabled=True),
+        validate=True,
+    )
+    md = convert("deck.pptx", options=opts)
+
+Internal submodules (parse_presentation, enrich_images, etc.) are NOT part
+of the public API and may change without notice.  Access via
+``from pptx_md.parser import parse_presentation`` is possible but outside
+SemVer guarantees (ADR-603).
 """
 
-__all__: list[str] = []
+from __future__ import annotations
+
+from pptx_md.api import ConvertOptions, convert
+from pptx_md.describer import ImageDescriber
+from pptx_md.errors import DescribeError, InstallationError, ParseError, PptxMdError
+from pptx_md.masking import MASK_TOKEN, MaskingOptions
+from pptx_md.providers import get_describer
+from pptx_md.validator import ValidationResult, validate_markdown
+
+__version__: str = "0.1.0"
+
+__all__ = [
+    "convert",
+    "ConvertOptions",
+    "MaskingOptions",
+    "MASK_TOKEN",
+    "validate_markdown",
+    "ValidationResult",
+    "ImageDescriber",
+    "get_describer",
+    "PptxMdError",
+    "ParseError",
+    "DescribeError",
+    "InstallationError",
+]
