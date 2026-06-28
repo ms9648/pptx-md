@@ -31,9 +31,7 @@ _WARN_HEADING_START: str = (
 
 
 def _warn_heading_jump(prev_level: int, cur_level: int) -> str:
-    return (
-        f"헤딩 레벨 점프: h{prev_level}에서 h{cur_level}로 2단계 이상 깊어졌습니다."
-    )
+    return f"헤딩 레벨 점프: h{prev_level}에서 h{cur_level}로 2단계 이상 깊어졌습니다."
 
 
 # ---------------------------------------------------------------------------

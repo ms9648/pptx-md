@@ -125,8 +125,7 @@ class TestAc4HeadingStartLevel:
         md = "### Deep Start\n\nContent."
         result = validate_markdown(md)
         assert any(
-            "시작" in w or "start" in w.lower() or "레벨" in w
-            for w in result.warnings
+            "시작" in w or "start" in w.lower() or "레벨" in w for w in result.warnings
         )
 
     def test_ac4_starts_with_h4(self) -> None:
@@ -159,8 +158,7 @@ class TestAc5HeadingLevelJump:
         md = "# Top\n\n#### Deep\n\nContent."
         result = validate_markdown(md)
         assert any(
-            "점프" in w or "jump" in w.lower() or "레벨" in w
-            for w in result.warnings
+            "점프" in w or "jump" in w.lower() or "레벨" in w for w in result.warnings
         )
 
     def test_ac5_h1_to_h3_jump(self) -> None:
@@ -300,9 +298,15 @@ class TestAc8NoDependency:
         with open(source_file, encoding="utf-8") as f:
             source = f.read()
         # 외부 Markdown 파서 라이브러리 이름이 소스에 포함되지 않아야 함
-        forbidden = ["import markdown", "import mistune", "import commonmark",
-                     "from markdown", "from mistune", "from commonmark"]
+        forbidden = [
+            "import markdown",
+            "import mistune",
+            "import commonmark",
+            "from markdown",
+            "from mistune",
+            "from commonmark",
+        ]
         for forbidden_import in forbidden:
-            assert forbidden_import not in source, (
-                f"외부 Markdown 파서 의존 발견: {forbidden_import}"
-            )
+            assert (
+                forbidden_import not in source
+            ), f"외부 Markdown 파서 의존 발견: {forbidden_import}"
