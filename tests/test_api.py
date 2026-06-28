@@ -59,6 +59,42 @@ def _make_minimal_presentation_ir(title: str = "Test Slide") -> PresentationIR:
     return pres
 
 
+def _make_ir_with_image(
+    title: str = "Slide With Image",
+    image_bytes: bytes = b"\x89PNG\r\n\x1a\n",
+    image_ext: str = "png",
+    alt_text: str = "",
+) -> PresentationIR:
+    """Build a PresentationIR that contains one ImageShapeIR for AC4/AC5 tests."""
+    from pptx_md.ir import ImageShapeIR  # noqa: PLC0415
+
+    slide = SlideIR(
+        index=0,
+        title=title,
+        shapes=[
+            TextShapeIR(
+                shape_id=1,
+                name="title",
+                kind=ShapeKind.TEXT,
+                paragraphs=[ParagraphIR(text=title, level=0)],
+                is_title=True,
+            ),
+            ImageShapeIR(
+                shape_id=2,
+                name="picture",
+                kind=ShapeKind.IMAGE,
+                image_bytes=image_bytes,
+                image_format=image_ext,
+                image_ext=image_ext,
+                alt_text=alt_text,
+            ),
+        ],
+    )
+    pres = PresentationIR(source_path="test.pptx")
+    pres.slides.append(slide)
+    return pres
+
+
 def _save_minimal_pptx(path: Path, title: str = "Slide 1") -> None:
     """Create a minimal single-slide PPTX at *path*."""
     prs = PptxPresentation()
@@ -176,7 +212,6 @@ class TestAc2PublicAll:
             "get_describer",
             "PptxMdError",
             "ParseError",
-            "ClassifyError",
             "DescribeError",
             "InstallationError",
         }
@@ -243,12 +278,22 @@ class TestAc3CoreOnlyImport:
 class TestAc4FakeDescriber:
     """ac4_fake_describer_주입 — fake describer must be called; result in Markdown."""
 
-    def test_ac4_describer_describe_called(self, tmp_path: Path) -> None:
-        """AC4: fake describer.describe is called when injected via ConvertOptions."""
+    def test_ac4_describer_describe_called_and_result_in_md(
+        self, tmp_path: Path
+    ) -> None:
+        """AC4: fake describer.describe is invoked by the real enrich_descriptions
+        pipeline and the returned text appears in the final Markdown output.
+
+        enrich_descriptions is NOT mocked so the real call chain
+        (enrich_descriptions -> _enrich_single -> describer.describe
+        -> shape.description) is exercised.  assemble_document is also real
+        so the description flows all the way through to the Markdown string.
+        """
         pptx_file = tmp_path / "deck.pptx"
         _save_minimal_pptx(pptx_file)
 
-        fake_ir = _make_minimal_presentation_ir()
+        # IR contains an ImageShapeIR so enrich_descriptions has something to process.
+        fake_ir = _make_ir_with_image(image_ext="png")
 
         fake_describer = MagicMock()
         fake_describer.describe.return_value = "a diagram showing system flow"
@@ -257,37 +302,41 @@ class TestAc4FakeDescriber:
             return fake_ir
 
         def fake_enrich_images(pres: Any) -> None:
+            # enrich_images (M3 classifier) is mocked to avoid real image bytes
+            # dependency; enrich_descriptions (M4) runs real.
             pass
-
-        def fake_enrich_descriptions(pres: Any, describer: Any) -> None:
-            # Simulate that the describer was invoked by the pipeline
-            if describer is not None:
-                describer.describe(b"\x89PNG", "png", None)
-
-        def fake_assemble(pres: Any, *, masking: Any = None) -> str:
-            return "# Slide\n\na diagram showing system flow\n"
 
         opts = ConvertOptions(describer=fake_describer)
 
         with (
             patch("pptx_md.api.parse_presentation", fake_parse),
             patch("pptx_md.api.enrich_images", fake_enrich_images),
-            patch("pptx_md.api.enrich_descriptions", fake_enrich_descriptions),
-            patch("pptx_md.api.assemble_document", fake_assemble),
         ):
             result = convert(pptx_file, options=opts)
 
+        # describer.describe must have been called by the real enrich_descriptions
         fake_describer.describe.assert_called_once()
+        # the returned description text must appear in the assembled Markdown
         assert "a diagram showing system flow" in result
 
     def test_ac4_describer_passed_to_enrich_descriptions(self, tmp_path: Path) -> None:
-        """AC4: the describer object is forwarded to enrich_descriptions."""
+        """AC4: the exact describer object is forwarded to enrich_descriptions."""
         pptx_file = tmp_path / "deck.pptx"
         _save_minimal_pptx(pptx_file)
 
-        fake_ir = _make_minimal_presentation_ir()
+        fake_ir = _make_ir_with_image()
         fake_describer = MagicMock()
+        # describe returns a string so enrich_descriptions doesn't error out
+        fake_describer.describe.return_value = "described"
         captured: list[Any] = []
+
+        original_enrich_descriptions = __import__(
+            "pptx_md.description_pipeline", fromlist=["enrich_descriptions"]
+        ).enrich_descriptions
+
+        def spy_enrich_descriptions(pres: Any, describer: Any) -> None:
+            captured.append(describer)
+            original_enrich_descriptions(pres, describer)
 
         def fake_parse(path: Any) -> PresentationIR:
             return fake_ir
@@ -295,19 +344,12 @@ class TestAc4FakeDescriber:
         def fake_enrich_images(pres: Any) -> None:
             pass
 
-        def fake_enrich_descriptions(pres: Any, describer: Any) -> None:
-            captured.append(describer)
-
-        def fake_assemble(pres: Any, *, masking: Any = None) -> str:
-            return "# Slide\n"
-
         opts = ConvertOptions(describer=fake_describer)
 
         with (
             patch("pptx_md.api.parse_presentation", fake_parse),
             patch("pptx_md.api.enrich_images", fake_enrich_images),
-            patch("pptx_md.api.enrich_descriptions", fake_enrich_descriptions),
-            patch("pptx_md.api.assemble_document", fake_assemble),
+            patch("pptx_md.api.enrich_descriptions", spy_enrich_descriptions),
         ):
             convert(pptx_file, options=opts)
 
@@ -323,11 +365,36 @@ class TestAc5MaskingEmail:
     """ac5_masking_options_이메일_치환 — enabled masking must replace email."""
 
     def test_ac5_email_redacted(self, tmp_path: Path) -> None:
-        """AC5: MaskingOptions(enabled=True) -> email address -> [REDACTED]."""
+        """AC5: MaskingOptions(enabled=True) -> email address -> [REDACTED].
+
+        Uses a real IR containing a text shape with an email address.
+        enrich_descriptions and enrich_images are mocked (no image bytes / VLM),
+        but assemble_document runs REAL with MaskingOptions(enabled=True) so
+        the actual mask_text() substitution path is exercised end-to-end.
+        """
         pptx_file = tmp_path / "deck.pptx"
         _save_minimal_pptx(pptx_file)
 
-        fake_ir = _make_minimal_presentation_ir()
+        # Build an IR whose text contains an email address.
+        slide = SlideIR(
+            index=0,
+            title="Contact",
+            shapes=[
+                TextShapeIR(
+                    shape_id=1,
+                    name="body",
+                    kind=ShapeKind.TEXT,
+                    paragraphs=[
+                        ParagraphIR(
+                            text="Contact user@example.com for details.", level=0
+                        )
+                    ],
+                    is_title=False,
+                )
+            ],
+        )
+        fake_ir = PresentationIR(source_path="test.pptx")
+        fake_ir.slides.append(slide)
 
         def fake_parse(path: Any) -> PresentationIR:
             return fake_ir
@@ -338,26 +405,18 @@ class TestAc5MaskingEmail:
         def fake_enrich_descriptions(pres: Any, describer: Any) -> None:
             pass
 
-        def fake_assemble(pres: Any, *, masking: Any = None) -> str:
-            raw = "Contact user@example.com for details."
-            if masking is not None and masking.enabled:
-                from pptx_md.masking import mask_text  # noqa: PLC0415
-
-                return mask_text(raw, masking)
-            return raw
-
         opts = ConvertOptions(masking=MaskingOptions(enabled=True))
 
         with (
             patch("pptx_md.api.parse_presentation", fake_parse),
             patch("pptx_md.api.enrich_images", fake_enrich_images),
             patch("pptx_md.api.enrich_descriptions", fake_enrich_descriptions),
-            patch("pptx_md.api.assemble_document", fake_assemble),
         ):
             result = convert(pptx_file, options=opts)
 
-        assert "user@example.com" not in result
-        assert "[REDACTED]" in result
+        # Real mask_text() must have replaced the email with [REDACTED].
+        assert "user@example.com" not in result, "email must be redacted"
+        assert "[REDACTED]" in result, "[REDACTED] token must appear in output"
 
     def test_ac5_masking_forwarded_to_assemble(self, tmp_path: Path) -> None:
         """AC5: masking option is forwarded to assemble_document as kwarg."""

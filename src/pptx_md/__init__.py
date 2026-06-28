@@ -43,12 +43,6 @@ __all__ = [
     "get_describer",
     "PptxMdError",
     "ParseError",
-    "ClassifyError",
     "DescribeError",
     "InstallationError",
 ]
-
-# ClassifyError is listed in __all__ per ADR-603 specification but does not
-# exist in the current error hierarchy.  Provide a public alias here so
-# ``from pptx_md import ClassifyError`` works as documented.
-ClassifyError = PptxMdError
