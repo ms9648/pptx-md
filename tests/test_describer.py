@@ -155,15 +155,72 @@ def test_ac3_shape_hint_none_허용() -> None:
 # AC4 — 시그니처 불일치 클래스를 ImageDescriber로 사용하면 mypy strict 타입 에러
 # ===========================================================================
 
+# Helper: run mypy --strict on src/ plus a temporary snippet file.
+# Using `mypy --strict src/ <snippet>` lets mypy follow pptx_md.describer
+# from the installed src package, so Protocol members are fully resolved
+# without generating false-positive [no-any-return] errors in the snippet.
+
+
+def _run_mypy_with_snippet(snippet: str) -> subprocess.CompletedProcess[str]:
+    """Write *snippet* to a temp file and run ``mypy --strict src/ <file>``."""
+    project_root = pathlib.Path(__file__).parent.parent
+    tmp_dir = project_root / "tests" / "_ac4_tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    snippet_path = tmp_dir / "snippet.py"
+    snippet_path.write_text(snippet, encoding="utf-8")
+    try:
+        return subprocess.run(
+            [sys.executable, "-m", "mypy", "--strict", "src/", str(snippet_path)],
+            capture_output=True,
+            text=True,
+            cwd=str(project_root),
+        )
+    finally:
+        snippet_path.unlink(missing_ok=True)
+        try:
+            tmp_dir.rmdir()
+        except OSError:
+            pass
+
+
+def test_ac4_mypy_올바른_시그니처_에러없음() -> None:
+    """AC4 GOOD: mypy --strict reports no error for correctly-typed describer.
+
+    A class whose describe() exactly matches the ImageDescriber protocol
+    must pass mypy --strict (exit 0).
+    """
+    snippet = textwrap.dedent("""\
+        from pptx_md.describer import ImageDescriber
+
+        class GoodDescriber:
+            def describe(
+                self,
+                image_bytes: bytes,
+                image_ext: str,
+                shape_hint: str | None,
+            ) -> str:
+                return "ok"
+
+        def use_describer(d: ImageDescriber) -> str:
+            return d.describe(b"", "png", None)
+
+        use_describer(GoodDescriber())
+        """)
+
+    result = _run_mypy_with_snippet(snippet)
+    assert result.returncode == 0, (
+        "Expected mypy exit 0 for correct ImageDescriber signature, "
+        f"but got exit {result.returncode}.\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+
 
 def test_ac4_mypy_시그니처_불일치_타입에러() -> None:
-    """AC4: mypy detects type error when incompatible class used as ImageDescriber.
+    """AC4 BAD: incompatible describer class triggers mypy strict error.
 
-    We write a small Python snippet with a deliberate type mismatch and run
-    mypy as a subprocess.  The test passes iff mypy exits with a non-zero
-    code (i.e., it found the expected type error).
+    A class with wrong return type (int instead of str) must cause mypy to
+    exit non-zero with an [arg-type] error.
     """
-    # Build a temporary snippet that has a wrong return type
     snippet = textwrap.dedent("""\
         from pptx_md.describer import ImageDescriber
 
@@ -182,23 +239,9 @@ def test_ac4_mypy_시그니처_불일치_타입에러() -> None:
         use_describer(BadDescriber())  # type error: incompatible type
         """)
 
-    # Write to a temp file in the scratchpad directory
-    scratchpad = pathlib.Path(
-        r"C:\Users\ms964\AppData\Local\Temp\claude\D--dev-pptx-md"
-        r"\7410c743-da47-49b5-a139-663e25f2b338\scratchpad"
-    )
-    scratchpad.mkdir(parents=True, exist_ok=True)
-    snippet_path = scratchpad / "bad_describer_check.py"
-    snippet_path.write_text(snippet, encoding="utf-8")
-
-    result = subprocess.run(
-        [sys.executable, "-m", "mypy", "--strict", str(snippet_path)],
-        capture_output=True,
-        text=True,
-    )
-    # mypy should exit non-zero because of the type mismatch
+    result = _run_mypy_with_snippet(snippet)
     assert result.returncode != 0, (
-        f"Expected mypy to report a type error for incompatible describer, "
+        "Expected mypy to report a type error for incompatible describer, "
         f"but it exited 0.\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
     # Confirm the error is type-related (not a mypy crash)
