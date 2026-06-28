@@ -88,19 +88,22 @@ def assemble_document(
     Returns:
         A single Markdown document string.
     """
+    # AC2: sort slides by index (ascending) regardless of IR list order (ADR-220)
+    sorted_slides = sorted(presentation.slides, key=lambda s: s.index)
+
     slide_blocks: list[str] = []
-    for idx, slide in enumerate(presentation.slides):
+    for slide in sorted_slides:
         try:
             block = _render_slide(slide, masking)
         except Exception as exc:  # noqa: BLE001 — slide-level isolation
             _logger.warning(
                 "assemble_document: slide index=%d failed, skipping. "
                 "shape_count=%d error_type=%s",
-                idx,
+                slide.index,
                 len(slide.shapes),
                 type(exc).__name__,
             )
-            block = f"{_SLIDE_HEADING_PREFIX} Slide {idx + 1}"
+            block = f"{_SLIDE_HEADING_PREFIX} Slide {slide.index + 1}"
         slide_blocks.append(block)
 
     return _SLIDE_SEPARATOR.join(slide_blocks)
