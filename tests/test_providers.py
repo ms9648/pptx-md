@@ -626,3 +626,112 @@ def test_ac7_black_check_exit0() -> None:
         f"black --check failed (exit {result.returncode}).\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# AC5 extra: providers/__init__.py — get_describer and __getattr__ coverage
+# (issue #44: providers/__init__.py was 45% — these tests cover missing lines)
+# ---------------------------------------------------------------------------
+
+
+def test_ac5_extra_get_describer_anthropic_경로_커버() -> None:
+    """AC5/coverage: get_describer('anthropic') must instantiate AnthropicDescriber.
+
+    Covers providers/__init__.py lines 57-60 (the 'anthropic' branch of get_describer).
+    """
+    mock_sdk = _build_mock_anthropic_sdk("result text")
+
+    with patch.dict(sys.modules, {"anthropic": mock_sdk}):
+        saved = sys.modules.pop("pptx_md.providers.anthropic", None)
+        try:
+            from pptx_md.providers import get_describer
+
+            describer = get_describer("anthropic", api_key="test-key")
+            assert describer is not None
+            # The returned object must have a describe method (ImageDescriber protocol)
+            assert callable(getattr(describer, "describe", None))
+        finally:
+            if saved is not None:
+                sys.modules["pptx_md.providers.anthropic"] = saved
+
+
+def test_ac5_extra_get_describer_openai_경로_커버() -> None:
+    """AC5/coverage: get_describer('openai') must instantiate OpenAIDescriber.
+
+    Covers providers/__init__.py lines 61-64 (the 'openai' branch of get_describer).
+    """
+    mock_sdk = _build_mock_openai_sdk("result text")
+
+    with patch.dict(sys.modules, {"openai": mock_sdk}):
+        saved = sys.modules.pop("pptx_md.providers.openai", None)
+        try:
+            from pptx_md.providers import get_describer
+
+            describer = get_describer("openai", api_key="test-key")
+            assert describer is not None
+            assert callable(getattr(describer, "describe", None))
+        finally:
+            if saved is not None:
+                sys.modules["pptx_md.providers.openai"] = saved
+
+
+def test_ac5_extra_getattr_anthropic_describer_반환() -> None:
+    """AC5/coverage: providers.__getattr__('AnthropicDescriber') must return the class.
+
+    Covers providers/__init__.py lines 73-76 (__getattr__ AnthropicDescriber branch).
+    """
+    mock_sdk = _build_mock_anthropic_sdk()
+
+    with patch.dict(sys.modules, {"anthropic": mock_sdk}):
+        # Clear cached __getattr__ result by removing from sys.modules
+        saved_pkg = sys.modules.pop("pptx_md.providers", None)
+        saved_cls = sys.modules.pop("pptx_md.providers.anthropic", None)
+        try:
+            import pptx_md.providers as providers_mod
+
+            # Access via attribute lookup (triggers __getattr__)
+            klass = providers_mod.AnthropicDescriber
+            assert klass is not None
+            # Instantiate to verify it's the real class
+            obj = klass(api_key="test-key")
+            assert callable(getattr(obj, "describe", None))
+        finally:
+            if saved_pkg is not None:
+                sys.modules["pptx_md.providers"] = saved_pkg
+            if saved_cls is not None:
+                sys.modules["pptx_md.providers.anthropic"] = saved_cls
+
+
+def test_ac5_extra_getattr_openai_describer_반환() -> None:
+    """AC5/coverage: providers.__getattr__('OpenAIDescriber') must return the class.
+
+    Covers providers/__init__.py lines 77-80 (__getattr__ OpenAIDescriber branch).
+    """
+    mock_sdk = _build_mock_openai_sdk()
+
+    with patch.dict(sys.modules, {"openai": mock_sdk}):
+        saved_pkg = sys.modules.pop("pptx_md.providers", None)
+        saved_cls = sys.modules.pop("pptx_md.providers.openai", None)
+        try:
+            import pptx_md.providers as providers_mod
+
+            klass = providers_mod.OpenAIDescriber
+            assert klass is not None
+            obj = klass(api_key="test-key")
+            assert callable(getattr(obj, "describe", None))
+        finally:
+            if saved_pkg is not None:
+                sys.modules["pptx_md.providers"] = saved_pkg
+            if saved_cls is not None:
+                sys.modules["pptx_md.providers.openai"] = saved_cls
+
+
+def test_ac5_extra_getattr_unknown_AttributeError() -> None:
+    """AC5/coverage: providers.__getattr__('NonExistent') raises AttributeError.
+
+    Covers providers/__init__.py line 81 (AttributeError raise path).
+    """
+    import pptx_md.providers as providers_mod
+
+    with pytest.raises(AttributeError, match="no attribute"):
+        _ = providers_mod.NonExistentClass  # type: ignore[attr-defined]
