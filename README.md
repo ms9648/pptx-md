@@ -169,18 +169,6 @@ except ParseError as e:
 
 ---
 
-## 내부 모듈 직접 접근 (SemVer 보증 밖)
-
-```python
-# 아래 import는 가능하지만 공개 API가 아니므로
-# SemVer 보증 범위 밖입니다. 버전 업데이트 시 깨질 수 있습니다.
-from pptx_md.parser import parse_presentation
-```
-
-공개 API 목록은 [docs/api.md](docs/api.md)를 참고하세요.
-
----
-
 ## 전체 API 레퍼런스
 
 [docs/api.md](docs/api.md) 에 공개 심볼 전체 레퍼런스가 있습니다.

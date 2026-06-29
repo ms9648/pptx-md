@@ -92,11 +92,26 @@ _INTERNAL_SYMBOLS = [
 ]
 
 
-def _extract_code_blocks(md: str) -> list[str]:
-    """Return all fenced Python code block bodies from a Markdown string."""
-    # Match ```python ... ``` or ``` ... ``` blocks
-    pattern = re.compile(r"```(?:python)?\n(.*?)```", re.DOTALL)
-    return pattern.findall(md)
+def _extract_code_blocks(text: str) -> list[str]:
+    """Return all fenced code block bodies from a Markdown string.
+
+    Uses a line-by-line state machine to ensure the last code block
+    is never missed (regex DOTALL approach failed to capture trailing blocks).
+    """
+    blocks = []
+    in_block = False
+    current: list[str] = []
+    for line in text.splitlines():
+        if line.strip().startswith("```"):
+            if in_block:
+                blocks.append("\n".join(current))
+                current = []
+                in_block = False
+            else:
+                in_block = True
+        elif in_block:
+            current.append(line)
+    return blocks
 
 
 def test_ac2_quick_start_uses_public_api_only() -> None:
