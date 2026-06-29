@@ -1,0 +1,72 @@
+name: Release
+
+# Trigger: annotated tag push matching v* (e.g., v0.1.0)
+# IMPORTANT (헌장 §1.5 / ADR-607): The actual tag push and PyPI publisher
+# registration must be performed by a human.  The publish job additionally
+# requires a manual approval gate via the "pypi" GitHub Environment.
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  # -------------------------------------------------------------------------
+  # build: produces wheel + sdist artifacts from the repository source
+  # -------------------------------------------------------------------------
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install hatch
+        run: pip install hatch
+
+      - name: Build wheel and sdist
+        run: hatch build
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  # -------------------------------------------------------------------------
+  # publish: uploads built artifacts to PyPI via OIDC Trusted Publishing
+  #
+  # Security notes (ADR-607 / NFR-05):
+  #   - No long-lived API token is stored in repository secrets.
+  #   - id-token: write grants this job a short-lived OIDC token that PyPI
+  #     exchanges for a temporary upload credential automatically.
+  #   - The "pypi" environment has protection rules requiring human approval
+  #     before this job executes (헌장 §1.5 / AC4).
+  #
+  # Pre-requisite (human task, ND-1):
+  #   Register a Trusted Publisher on pypi.org:
+  #     Owner:       ms9648
+  #     Repository:  pptx-md
+  #     Workflow:    release.yml
+  #     Environment: pypi
+  # -------------------------------------------------------------------------
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi          # GitHub Environment Protection Rules — human approval gate (AC4)
+    permissions:
+      id-token: write          # OIDC Trusted Publishing — no plaintext token (ADR-607, AC3)
+
+    steps:
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI (OIDC)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true

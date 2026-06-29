@@ -27,7 +27,7 @@ dependencies = [
 [project.optional-dependencies]
 # VLM SDK 는 반드시 여기에만 (스킬 §4, ADR-002). core 에 포함 금지.
 vlm = [
-    "anthropic>=0.20",
+    "anthropic>=0.40",
     "openai>=1.0",
 ]
 dev = [
