@@ -118,34 +118,70 @@ def assemble_document(
 def _render_slide(slide: SlideIR, masking: MaskingOptions | None) -> str:
     """Render a single SlideIR to Markdown."""
     parts: list[str] = []
+    slide_num = slide.index + 1
 
-    # Heading (AC1: first line is heading)
+    # FR-20: Heading — use slide.title first; fall back to first is_title shape;
+    # last resort: ## Slide N
+    title_shape_used: TextShapeIR | None = None
     if slide.title:
         parts.append(f"{_SLIDE_HEADING_PREFIX} {slide.title}")
     else:
-        # Blank title: emit heading with slide index+1 (1-based display)
-        parts.append(f"{_SLIDE_HEADING_PREFIX} Slide {slide.index + 1}")
+        # Search for the first is_title=True shape to use as heading
+        for shape in slide.shapes:
+            if isinstance(shape, TextShapeIR) and shape.is_title and shape.paragraphs:
+                heading_text = shape.paragraphs[0].text.strip()
+                if heading_text:
+                    parts.append(f"{_SLIDE_HEADING_PREFIX} {heading_text}")
+                    title_shape_used = shape
+                    break
+        if title_shape_used is None:
+            # Fallback: no title available
+            parts.append(f"{_SLIDE_HEADING_PREFIX} Slide {slide_num}")
+
+    # FR-22: image counter (mutable list used as a reference for group recursion)
+    img_counter: list[int] = [0]
 
     # Shapes in IR order (AC1: shapes serialised in IR appearance order)
     for shape in slide.shapes:
-        rendered = _render_shape(shape, masking)
+        # FR-20: skip the shape already used as heading
+        if shape is title_shape_used:
+            continue
+        # FR-21: skip footer/slide-number/date placeholders
+        if isinstance(shape, TextShapeIR) and shape.is_footer:
+            continue
+        rendered = _render_shape(
+            shape, masking, slide_num=slide_num, img_counter=img_counter
+        )
         if rendered:
             parts.append(rendered)
 
     return "\n\n".join(parts)
 
 
-def _render_shape(shape: ShapeIR, masking: MaskingOptions | None) -> str:
+def _render_shape(
+    shape: ShapeIR,
+    masking: MaskingOptions | None,
+    *,
+    slide_num: int = 0,
+    img_counter: list[int] | None = None,
+) -> str:
     """Dispatch to the appropriate renderer; isolate per-shape failures (ADR-220)."""
+    if img_counter is None:
+        img_counter = [0]
     try:
         if isinstance(shape, TextShapeIR):
             return _render_text(shape, masking)
         if isinstance(shape, TableShapeIR):
             return _render_table(shape)
         if isinstance(shape, ImageShapeIR):
-            return _render_image(shape, masking)
+            img_counter[0] += 1
+            return _render_image(
+                shape, masking, slide_num=slide_num, img_num=img_counter[0]
+            )
         if isinstance(shape, GroupShapeIR):
-            return _render_group(shape, masking)
+            return _render_group(
+                shape, masking, slide_num=slide_num, img_counter=img_counter
+            )
         if isinstance(shape, OtherShapeIR):
             return _render_other(shape, masking)
         # Unknown subclass — best-effort skip
@@ -213,14 +249,20 @@ def _render_table(shape: TableShapeIR) -> str:
     return "\n".join(table_lines)
 
 
-def _render_image(shape: ImageShapeIR, masking: MaskingOptions | None) -> str:
-    """Render an ImageShapeIR according to M3/M4 slot priority (AC4, AC5, §3.4).
+def _render_image(
+    shape: ImageShapeIR,
+    masking: MaskingOptions | None,
+    *,
+    slide_num: int = 0,
+    img_num: int = 0,
+) -> str:
+    """Render an ImageShapeIR according to M3/M4 slot priority (AC4, AC5, FR-22, §3.4).
 
     Priority (first match):
     1. description (M4) present -> body paragraph (+ classification label)
     2. description absent, alt_text present -> ![alt_text](...)
-    3. both absent, classification (M3) present -> _[image: {classification}]_
-    4. all absent -> _[image]_
+    3. both absent -> standard marker ![슬라이드 N 이미지 M] (FR-22)
+       3a. classification present -> ![슬라이드 N 이미지 M — {classification}]
     """
     description = shape.description
     alt_text = shape.alt_text
@@ -235,22 +277,40 @@ def _render_image(shape: ImageShapeIR, masking: MaskingOptions | None) -> str:
             return f"{text}\n\n_[{classification} image]_"
         return text
 
-    # AC5: description=None -> alt_text image syntax
+    # AC5/FR-22: description=None
     if alt_text:
+        # alt_text present -> ![alt_text](...) (priority over no-VLM marker)
         masked_alt = mask_text(alt_text, masking) if masking is not None else alt_text
         return f"![{masked_alt}](...)"
 
+    # FR-22: no description, no alt_text -> standard positional marker
     if classification is not None:
-        return f"_[image: {classification}]_"
+        return f"![슬라이드 {slide_num} 이미지 {img_num} — {classification}]"
+    return f"![슬라이드 {slide_num} 이미지 {img_num}]"
 
-    return "_[image]_"
 
+def _render_group(
+    shape: GroupShapeIR,
+    masking: MaskingOptions | None,
+    *,
+    slide_num: int = 0,
+    img_counter: list[int] | None = None,
+) -> str:
+    """Render a GroupShapeIR by recursively rendering children in order (AC6).
 
-def _render_group(shape: GroupShapeIR, masking: MaskingOptions | None) -> str:
-    """Render a GroupShapeIR by recursively rendering children in order (AC6)."""
+    slide_num and img_counter are propagated to children so that image numbers
+    are shared across the whole slide (FR-22).
+    """
+    if img_counter is None:
+        img_counter = [0]
     child_parts: list[str] = []
     for child in shape.children:
-        rendered = _render_shape(child, masking)
+        # FR-21: skip footer shapes inside groups too
+        if isinstance(child, TextShapeIR) and child.is_footer:
+            continue
+        rendered = _render_shape(
+            child, masking, slide_num=slide_num, img_counter=img_counter
+        )
         if rendered:
             child_parts.append(rendered)
     return "\n\n".join(child_parts)

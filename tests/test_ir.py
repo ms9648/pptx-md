@@ -419,6 +419,7 @@ def test_ac8_직렬화_텍스트_도형_계층() -> None:
         "kind": "text",
         "paragraphs": [{"text": "Hello World", "level": 0}],
         "is_title": True,
+        "is_footer": False,  # FR-21: new field with default False
     }
 
 

@@ -140,10 +140,11 @@ def _dispatch_shape(shape: object, sid: int, name: str) -> ShapeIR:
 
 
 def _parse_text(shape: object, sid: int, name: str) -> TextShapeIR:
-    """Parse a text-frame shape into TextShapeIR (FR-04 AC1)."""
+    """Parse a text-frame shape into TextShapeIR (FR-04 AC1, FR-21)."""
     # Determine if this is a title placeholder.
     # python-pptx raises ValueError for non-placeholder shapes, so we catch it.
     is_title = False
+    is_footer = False
     try:
         placeholder_format = shape.placeholder_format  # type: ignore[attr-defined]
         if placeholder_format is not None:
@@ -151,11 +152,14 @@ def _parse_text(shape: object, sid: int, name: str) -> TextShapeIR:
             if ph_type is not None:
                 # PP_PLACEHOLDER.CENTER_TITLE = 3, TITLE = 15
                 ph_type_str = str(ph_type)
-                is_title = "TITLE" in ph_type_str or "TITLE" in str(
-                    getattr(ph_type, "name", "")
+                ph_name = str(getattr(ph_type, "name", ph_type_str)).upper()
+                is_title = "TITLE" in ph_type_str or "TITLE" in ph_name
+                # FR-21: FOOTER(11), SLIDE_NUMBER(12), DATE(10/13)
+                is_footer = any(
+                    k in ph_name for k in ("FOOTER", "SLIDE_NUMBER", "DATE")
                 )
     except (ValueError, AttributeError):
-        # Not a placeholder shape — is_title stays False
+        # Not a placeholder shape — is_title/is_footer stay False
         pass
 
     paragraphs: list[ParagraphIR] = []
@@ -172,6 +176,7 @@ def _parse_text(shape: object, sid: int, name: str) -> TextShapeIR:
         kind=ShapeKind.TEXT,
         paragraphs=paragraphs,
         is_title=is_title,
+        is_footer=is_footer,
     )
 
 

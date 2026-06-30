@@ -288,11 +288,12 @@ class TestAc4DescriptionNoneNoVlm:
             ), f"assembler imported forbidden module: {name}"
 
     def test_ac4_image_placeholder_when_no_description_no_alt(self) -> None:
-        """description=None, alt_text='' -> placeholder output, no exception."""
+        """description=None, alt_text='' -> positional marker, no exception (FR-22)."""
         shape = _image_shape(alt_text="", description=None, classification=None)
         slides = [SlideIR(index=0, title="T", shapes=[shape])]
         doc = assemble_document(_make_presentation(slides))
-        assert "_[image]_" in doc
+        # FR-22: standard positional marker replaces _[image]_
+        assert "![슬라이드 1 이미지 1]" in doc
 
 
 # ---------------------------------------------------------------------------
