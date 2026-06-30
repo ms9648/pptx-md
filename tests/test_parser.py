@@ -628,3 +628,119 @@ class TestPresentationIRMeta:
         pres = _parse_bytes(pptx_with_text_slide, tmp_path)
         assert pres.slide_width_emu > 0
         assert pres.slide_height_emu > 0
+
+
+# ===========================================================================
+# FR-21 (#54): 푸터·슬라이드번호·날짜 플레이스홀더 is_footer 필드
+# ===========================================================================
+
+
+class TestFR21FooterPlaceholderParsing:
+    """FR-21 (#54): _parse_text()의 is_footer 필드 감지 검증"""
+
+    def test_ac1_is_footer_default_false_in_ir(self) -> None:
+        """ac1_is_footer_기본값_False: TextShapeIR의 is_footer 필드 기본값은 False."""
+        from pptx_md.ir import ShapeKind, TextShapeIR
+
+        shape = TextShapeIR(
+            shape_id=1,
+            name="test",
+            kind=ShapeKind.TEXT,
+            paragraphs=[],
+        )
+        assert hasattr(shape, "is_footer")
+        assert shape.is_footer is False
+
+    def test_ac2_regular_textbox_is_footer_false(self, tmp_path: Path) -> None:
+        """ac2_일반_텍스트박스_is_footer_False: 일반 텍스트박스는 is_footer=False."""
+        prs = PptxPresentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        tb = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(2), Inches(1))
+        tb.text_frame.text = "Normal text"
+
+        buf = io.BytesIO()
+        prs.save(buf)
+        p = tmp_path / "regular_text.pptx"
+        p.write_bytes(buf.getvalue())
+
+        pres = parse_presentation(p)
+        text_shapes = [s for s in pres.slides[0].shapes if isinstance(s, TextShapeIR)]
+        assert len(text_shapes) >= 1
+        # 일반 텍스트박스는 is_footer가 False여야 함
+        normal_shapes = [s for s in text_shapes if not s.is_title]
+        for s in normal_shapes:
+            assert (
+                s.is_footer is False
+            ), f"일반 텍스트박스 '{s.name}'의 is_footer가 True임"
+
+    def test_ac3_footer_placeholder_detected_via_mock_placeholder_format(
+        self, tmp_path: Path
+    ) -> None:
+        """ac3: placeholder type name includes FOOTER -> is_footer=True.
+
+        Real FOOTER placeholder is hard to create with python-pptx;
+        call _parse_text() directly with a mock placeholder_format.
+        """
+        from unittest.mock import MagicMock
+
+        from pptx_md.parser import _parse_text  # type: ignore[attr-defined]
+
+        # Mock shape with placeholder_format whose type name includes "FOOTER"
+        mock_shape = MagicMock()
+        mock_ph_type = MagicMock()
+        mock_ph_type.name = "FOOTER"
+        mock_ph_type.__str__ = lambda self: "FOOTER"
+        mock_shape.placeholder_format.type = mock_ph_type
+        mock_shape.text_frame.paragraphs = []
+
+        result = _parse_text(mock_shape, sid=99, name="footer_test")
+        assert result.is_footer is True
+
+    def test_ac4_slide_number_placeholder_detected(self, tmp_path: Path) -> None:
+        """ac4_SLIDE_NUMBER_placeholder_감지: SLIDE_NUMBER 포함 시 is_footer=True."""
+        from unittest.mock import MagicMock
+
+        from pptx_md.parser import _parse_text  # type: ignore[attr-defined]
+
+        mock_shape = MagicMock()
+        mock_ph_type = MagicMock()
+        mock_ph_type.name = "SLIDE_NUMBER"
+        mock_ph_type.__str__ = lambda self: "SLIDE_NUMBER"
+        mock_shape.placeholder_format.type = mock_ph_type
+        mock_shape.text_frame.paragraphs = []
+
+        result = _parse_text(mock_shape, sid=100, name="slide_num_test")
+        assert result.is_footer is True
+
+    def test_ac5_date_placeholder_detected(self, tmp_path: Path) -> None:
+        """ac5_DATE_placeholder_감지: DATE 포함 시 is_footer=True."""
+        from unittest.mock import MagicMock
+
+        from pptx_md.parser import _parse_text  # type: ignore[attr-defined]
+
+        mock_shape = MagicMock()
+        mock_ph_type = MagicMock()
+        mock_ph_type.name = "DATE_AND_TIME"
+        mock_ph_type.__str__ = lambda self: "DATE_AND_TIME"
+        mock_shape.placeholder_format.type = mock_ph_type
+        mock_shape.text_frame.paragraphs = []
+
+        result = _parse_text(mock_shape, sid=101, name="date_test")
+        assert result.is_footer is True
+
+    def test_ac6_title_placeholder_is_not_footer(self, tmp_path: Path) -> None:
+        """ac6: TITLE placeholder type -> is_footer=False."""
+        from unittest.mock import MagicMock
+
+        from pptx_md.parser import _parse_text  # type: ignore[attr-defined]
+
+        mock_shape = MagicMock()
+        mock_ph_type = MagicMock()
+        mock_ph_type.name = "TITLE"
+        mock_ph_type.__str__ = lambda self: "TITLE"
+        mock_shape.placeholder_format.type = mock_ph_type
+        mock_shape.text_frame.paragraphs = []
+
+        result = _parse_text(mock_shape, sid=102, name="title_test")
+        assert result.is_footer is False
+        assert result.is_title is True

@@ -279,15 +279,16 @@ class TestAc5ImageWithoutDescription:
         # Should not contain random text that looks like a description
         assert "![Logo](...)" in md
 
-    def test_ac5_no_alt_no_desc_falls_back_to_placeholder(self) -> None:
-        """Both alt_text and description absent -> placeholder."""
+    def test_ac5_no_alt_no_desc_falls_back_to_marker(self) -> None:
+        """Both absent -> standard positional marker (FR-22)."""
         shape = _image_shape(alt_text="", description=None, classification=None)
         slide = SlideIR(index=0, title="T", shapes=[shape])
         md = assemble_slide(slide)
-        assert "_[image]_" in md
+        # FR-22: positional marker format (slide 1-based, image 1-based)
+        assert "![슬라이드 1 이미지 1]" in md
 
-    def test_ac5_classification_placeholder_when_no_alt_no_desc(self) -> None:
-        """classification present but no alt/desc -> _[image: {cls}]_ placeholder."""
+    def test_ac5_classification_marker_when_no_alt_no_desc(self) -> None:
+        """classification + no alt/desc -> positional marker with cls (FR-22)."""
         shape = _image_shape(
             alt_text="",
             description=None,
@@ -295,7 +296,7 @@ class TestAc5ImageWithoutDescription:
         )
         slide = SlideIR(index=0, title="T", shapes=[shape])
         md = assemble_slide(slide)
-        assert "_[image: photo]_" in md
+        assert "![슬라이드 1 이미지 1 — photo]" in md
 
 
 # ---------------------------------------------------------------------------
@@ -445,3 +446,203 @@ class TestAssembleDocument:
         doc1 = assemble_document(pres)
         doc2 = assemble_document(pres)
         assert doc1 == doc2
+
+
+# ---------------------------------------------------------------------------
+# FR-20 (#53): 슬라이드 실제 제목 heading 사용
+# ---------------------------------------------------------------------------
+
+
+def _title_shape(text: str, shape_id: int = 10) -> TextShapeIR:
+    """Helper: create an is_title=True TextShapeIR."""
+    return TextShapeIR(
+        shape_id=shape_id,
+        name="title",
+        kind=ShapeKind.TEXT,
+        paragraphs=[ParagraphIR(text=text, level=0)],
+        is_title=True,
+    )
+
+
+class TestFR20SlideTitleHeading:
+    """FR-20 (#53): is_title 도형을 heading으로 활용"""
+
+    def test_ac1_is_title_shape_used_as_heading_when_slide_title_empty(self) -> None:
+        """ac1: is_title shape becomes heading when slide.title==""."""
+        title_s = _title_shape("실제 제목")
+        body_s = _text_shape([_para("본문 내용")])
+        slide = SlideIR(index=0, title="", shapes=[title_s, body_s])
+        md = assemble_slide(slide)
+        assert md.startswith("## 실제 제목")
+
+    def test_ac2_is_title_shape_not_duplicated_in_body(self) -> None:
+        """ac2: is_title shape used as heading must not appear in body."""
+        title_s = _title_shape("헤딩 텍스트")
+        body_s = _text_shape([_para("본문")])
+        slide = SlideIR(index=0, title="", shapes=[title_s, body_s])
+        md = assemble_slide(slide)
+        # "헤딩 텍스트"는 헤딩에만 한 번 등장해야 함
+        assert md.count("헤딩 텍스트") == 1
+        # 본문은 존재
+        assert "본문" in md
+
+    def test_ac3_fallback_to_slide_n_when_no_title_and_no_is_title_shape(self) -> None:
+        """ac3: no title + no is_title shape -> ## Slide N fallback."""
+        body_s = _text_shape([_para("내용")])
+        slide = SlideIR(index=2, title="", shapes=[body_s])
+        md = assemble_slide(slide)
+        assert md.startswith("## Slide 3")
+
+    def test_ac4_slide_title_takes_priority_over_is_title_shape(self) -> None:
+        """ac4: slide.title present -> is_title shape not used as heading."""
+        title_s = _title_shape("도형 제목")
+        slide = SlideIR(index=0, title="실제 슬라이드 제목", shapes=[title_s])
+        md = assemble_slide(slide)
+        assert md.startswith("## 실제 슬라이드 제목")
+
+    def test_ac5_existing_tests_unaffected_with_non_empty_slide_title(self) -> None:
+        """ac5_기존_title_있는_슬라이드_정상: slide.title 있으면 기존 동작 유지."""
+        shape = _text_shape([_para("내용")])
+        slide = SlideIR(index=0, title="기존 제목", shapes=[shape])
+        md = assemble_slide(slide)
+        assert md.startswith("## 기존 제목")
+        assert "내용" in md
+
+
+# ---------------------------------------------------------------------------
+# FR-21 (#54): 푸터·슬라이드번호 플레이스홀더 필터링
+# ---------------------------------------------------------------------------
+
+
+def _footer_shape(text: str, shape_id: int = 60) -> TextShapeIR:
+    """Helper: create an is_footer=True TextShapeIR."""
+    return TextShapeIR(
+        shape_id=shape_id,
+        name="footer",
+        kind=ShapeKind.TEXT,
+        paragraphs=[ParagraphIR(text=text, level=0)],
+        is_footer=True,
+    )
+
+
+class TestFR21FooterFiltering:
+    """FR-21 (#54): is_footer 도형 assembler 출력 제외"""
+
+    def test_ac1_is_footer_field_exists_in_ir(self) -> None:
+        """ac1_is_footer_필드_존재: TextShapeIR에 is_footer 필드가 있다."""
+        shape = TextShapeIR(
+            shape_id=1,
+            name="test",
+            kind=ShapeKind.TEXT,
+            paragraphs=[],
+        )
+        assert hasattr(shape, "is_footer")
+        assert shape.is_footer is False  # default
+
+    def test_ac2_footer_shape_not_in_output(self) -> None:
+        """ac2: is_footer=True shape is excluded from assembler output."""
+        footer = _footer_shape("기관명 푸터")
+        normal = _text_shape([_para("슬라이드 본문")])
+        slide = SlideIR(index=0, title="제목", shapes=[footer, normal])
+        md = assemble_slide(slide)
+        assert "기관명 푸터" not in md
+        assert "슬라이드 본문" in md
+
+    def test_ac3_multiple_footers_all_excluded(self) -> None:
+        """ac3_복수_footer_모두_제외: 여러 is_footer 도형 모두 제외."""
+        footer1 = _footer_shape("푸터1", shape_id=60)
+        footer2 = _footer_shape("페이지 번호", shape_id=61)
+        body = _text_shape([_para("본문 텍스트")])
+        slide = SlideIR(index=0, title="T", shapes=[footer1, footer2, body])
+        md = assemble_slide(slide)
+        assert "푸터1" not in md
+        assert "페이지 번호" not in md
+        assert "본문 텍스트" in md
+
+    def test_ac4_footer_in_group_excluded(self) -> None:
+        """ac4_그룹내_footer_제외: GroupShapeIR 내 is_footer 도형도 출력 제외."""
+        footer = _footer_shape("그룹내 푸터")
+        normal_child = _text_shape([_para("그룹 본문")], shape_id=11)
+        group = _group_shape([footer, normal_child])
+        slide = SlideIR(index=0, title="T", shapes=[group])
+        md = assemble_slide(slide)
+        assert "그룹내 푸터" not in md
+        assert "그룹 본문" in md
+
+    def test_ac5_normal_shape_unaffected(self) -> None:
+        """ac5_일반_도형_영향없음: is_footer=False 도형은 정상 출력."""
+        normal = _text_shape([_para("일반 텍스트")])
+        slide = SlideIR(index=0, title="T", shapes=[normal])
+        md = assemble_slide(slide)
+        assert "일반 텍스트" in md
+
+
+# ---------------------------------------------------------------------------
+# FR-22 (#55): no-VLM 이미지 플레이스홀더 표준 마커
+# ---------------------------------------------------------------------------
+
+
+class TestFR22ImageMarker:
+    """FR-22 (#55): no-VLM 이미지 슬라이드/이미지 번호 마커"""
+
+    def test_ac1_no_vlm_image_uses_positional_marker(self) -> None:
+        """ac1: description=None, alt_text="" -> ![슬라이드 N 이미지 M]."""
+        image = _image_shape(alt_text="", description=None, classification=None)
+        slide = SlideIR(index=0, title="T", shapes=[image])
+        md = assemble_slide(slide)
+        assert "![슬라이드 1 이미지 1]" in md
+
+    def test_ac2_slide_num_1based(self) -> None:
+        """ac2_슬라이드번호_1기반: slide.index=2 -> '슬라이드 3 이미지 1'."""
+        image = _image_shape(alt_text="", description=None, classification=None)
+        slide = SlideIR(index=2, title="T", shapes=[image])
+        md = assemble_slide(slide)
+        assert "![슬라이드 3 이미지 1]" in md
+
+    def test_ac3_multiple_images_numbered_sequentially(self) -> None:
+        """ac3_복수이미지_순번_증가: 같은 슬라이드 내 이미지는 1,2,3 순번."""
+        img1 = _image_shape(shape_id=31)
+        img2 = _image_shape(shape_id=32)
+        img3 = _image_shape(shape_id=33)
+        slide = SlideIR(index=0, title="T", shapes=[img1, img2, img3])
+        md = assemble_slide(slide)
+        assert "![슬라이드 1 이미지 1]" in md
+        assert "![슬라이드 1 이미지 2]" in md
+        assert "![슬라이드 1 이미지 3]" in md
+
+    def test_ac4_alt_text_takes_priority_over_marker(self) -> None:
+        """ac4_alt_text_우선순위: alt_text 있으면 기존 ![alt_text](...) 유지."""
+        image = _image_shape(alt_text="회사 로고", description=None)
+        slide = SlideIR(index=0, title="T", shapes=[image])
+        md = assemble_slide(slide)
+        assert "![회사 로고](...)" in md
+        assert "슬라이드 1 이미지" not in md
+
+    def test_ac5_description_takes_highest_priority(self) -> None:
+        """ac5_description_최우선: description 있으면 마커 출력 없음."""
+        image = _image_shape(description="차트 설명 텍스트")
+        slide = SlideIR(index=0, title="T", shapes=[image])
+        md = assemble_slide(slide)
+        assert "차트 설명 텍스트" in md
+        assert "슬라이드 1 이미지" not in md
+
+    def test_ac6_classification_appended_to_marker(self) -> None:
+        """ac6_classification_마커에_포함: classification 있으면 — {cls} 추가."""
+        image = _image_shape(
+            alt_text="",
+            description=None,
+            classification=ImageClass.DIAGRAM,
+        )
+        slide = SlideIR(index=0, title="T", shapes=[image])
+        md = assemble_slide(slide)
+        assert "![슬라이드 1 이미지 1 — diagram]" in md
+
+    def test_ac7_image_in_group_counted(self) -> None:
+        """ac7: images in GroupShapeIR share the slide-wide image counter."""
+        img_outside = _image_shape(shape_id=31)
+        img_in_group = _image_shape(shape_id=32)
+        group = _group_shape([img_in_group])
+        slide = SlideIR(index=0, title="T", shapes=[img_outside, group])
+        md = assemble_slide(slide)
+        assert "![슬라이드 1 이미지 1]" in md
+        assert "![슬라이드 1 이미지 2]" in md

@@ -67,6 +67,9 @@ class TextShapeIR(ShapeIR):
 
     paragraphs: list[ParagraphIR] = field(default_factory=list)
     is_title: bool = False  # True when the shape originates from a title placeholder
+    is_footer: bool = (
+        False  # True when shape is a footer/slide-number/date placeholder (FR-21)
+    )
 
 
 @dataclass
