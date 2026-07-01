@@ -3,7 +3,10 @@
 Public interface:
     assemble_slide(slide: SlideIR, *, masking: MaskingOptions | None = None) -> str
     assemble_document(
-        presentation: PresentationIR, *, masking: MaskingOptions | None = None
+        presentation: PresentationIR,
+        *,
+        masking: MaskingOptions | None = None,
+        suppress_repeated_labels: bool = False,
     ) -> str
 
 Design constraints (ADR-218):
@@ -18,6 +21,7 @@ Design constraints (ADR-218):
 from __future__ import annotations
 
 import logging
+import re
 
 from pptx_md.ir import (
     GroupShapeIR,
@@ -43,6 +47,70 @@ _SLIDE_HEADING_PREFIX: str = "##"
 _INDENT_UNIT: str = "  "  # two spaces per indent level
 _BULLET_MARKER: str = "- "
 _SLIDE_SEPARATOR: str = "\n\n---\n\n"
+
+# Pre-compiled regex patterns for normalization (ADR-218: deterministic, pure)
+_RE_VERTICAL_TAB: re.Pattern[str] = re.compile(r"\v")
+_RE_CONSECUTIVE_SPACES: re.Pattern[str] = re.compile(r"[ \t]{2,}")
+_RE_CONSECUTIVE_BLANK_LINES: re.Pattern[str] = re.compile(r"\n{3,}")
+
+
+# ---------------------------------------------------------------------------
+# Normalization utilities (FR-24: pure functions, input-immutable)
+# ---------------------------------------------------------------------------
+
+
+def _normalize_text(text: str) -> str:
+    """Normalize a paragraph text string (AC2, AC3 — FR-24).
+
+    Transformations applied in order:
+    1. Replace vertical-tab U+000B (PPTX soft line-break) with newline (AC2).
+    2. Collapse consecutive spaces/tabs to a single space (AC3).
+
+    Pure function: does not mutate input.  Deterministic (ADR-218).
+
+    Args:
+        text: Raw paragraph text from ParagraphIR.
+
+    Returns:
+        Normalized text string.
+    """
+    # AC2: vertical tab -> newline
+    text = _RE_VERTICAL_TAB.sub("\n", text)
+    # AC3: consecutive spaces/tabs -> single space
+    text = _RE_CONSECUTIVE_SPACES.sub(" ", text)
+    return text
+
+
+def _collapse_blank_lines(text: str) -> str:
+    """Collapse runs of 3+ consecutive newlines down to 2 (AC5 — FR-24).
+
+    Pure function. Deterministic (ADR-218).
+
+    Args:
+        text: Multi-line text (already assembled from paragraphs).
+
+    Returns:
+        Text with at most one blank line between content lines.
+    """
+    return _RE_CONSECUTIVE_BLANK_LINES.sub("\n\n", text)
+
+
+def _is_table_all_blank(shape: TableShapeIR) -> bool:
+    """Return True when every cell text in the table is empty/whitespace (AC4 — FR-24).
+
+    Pure function.  Deterministic (ADR-218).
+
+    Args:
+        shape: A TableShapeIR instance (read-only).
+
+    Returns:
+        True if all cells are blank, False otherwise.
+    """
+    for row in shape.rows:
+        for cell in row:
+            if cell.strip():
+                return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +143,7 @@ def assemble_document(
     presentation: PresentationIR,
     *,
     masking: MaskingOptions | None = None,
+    suppress_repeated_labels: bool = False,
 ) -> str:
     """Map-Reduce assembly of the whole presentation into one document (FR-12).
 
@@ -85,11 +154,14 @@ def assemble_document(
     Args:
         presentation: A PresentationIR instance (read-only).
         masking: Optional MaskingOptions instance (FR-15).
+        suppress_repeated_labels: When True, deduplicate consecutive identical
+            section labels across slide blocks (AC6 — FR-24).  Default False
+            preserves existing behaviour.
 
     Returns:
         A single Markdown document string.
     """
-    # AC2: sort slides by index (ascending) regardless of IR list order (ADR-220)
+    # sort slides by index (ascending) regardless of IR list order (ADR-220)
     sorted_slides = sorted(presentation.slides, key=lambda s: s.index)
 
     slide_blocks: list[str] = []
@@ -107,6 +179,9 @@ def assemble_document(
             block = f"{_SLIDE_HEADING_PREFIX} Slide {slide.index + 1}"
         slide_blocks.append(block)
 
+    if suppress_repeated_labels:
+        slide_blocks = _suppress_repeated_labels(slide_blocks)
+
     return _SLIDE_SEPARATOR.join(slide_blocks)
 
 
@@ -122,9 +197,21 @@ def _render_slide(slide: SlideIR, masking: MaskingOptions | None) -> str:
 
     # FR-20: Heading — use slide.title first; fall back to first is_title shape;
     # last resort: ## Slide N
+    # AC1 (FR-24): when slide.title is set, also skip any is_title=True shape
+    # whose text matches slide.title (strip comparison) to prevent duplicate output.
     title_shape_used: TextShapeIR | None = None
     if slide.title:
         parts.append(f"{_SLIDE_HEADING_PREFIX} {slide.title}")
+        # AC1: find a matching is_title shape to suppress from body rendering
+        for shape in slide.shapes:
+            if (
+                isinstance(shape, TextShapeIR)
+                and shape.is_title
+                and shape.paragraphs
+                and shape.paragraphs[0].text.strip() == slide.title.strip()
+            ):
+                title_shape_used = shape
+                break
     else:
         # Search for the first is_title=True shape to use as heading
         for shape in slide.shapes:
@@ -141,9 +228,9 @@ def _render_slide(slide: SlideIR, masking: MaskingOptions | None) -> str:
     # FR-22: image counter (mutable list used as a reference for group recursion)
     img_counter: list[int] = [0]
 
-    # Shapes in IR order (AC1: shapes serialised in IR appearance order)
+    # Shapes in IR order (shapes serialised in IR appearance order)
     for shape in slide.shapes:
-        # FR-20: skip the shape already used as heading
+        # FR-20 / AC1: skip the shape already used as heading
         if shape is title_shape_used:
             continue
         # FR-21: skip footer/slide-number/date placeholders
@@ -202,32 +289,52 @@ def _render_shape(
 
 
 def _render_text(shape: TextShapeIR, masking: MaskingOptions | None) -> str:
-    """Render a TextShapeIR to Markdown paragraphs / indented bullets (AC1, AC2)."""
+    """Render a TextShapeIR to Markdown paragraphs / indented bullets.
+
+    Applies FR-24 normalizations:
+    - AC2: \\v -> \\n via _normalize_text
+    - AC3: consecutive spaces/tabs collapsed via _normalize_text
+    - AC5: consecutive blank lines collapsed to max 1 blank line
+    """
     lines: list[str] = []
     for para in shape.paragraphs:
         text = para.text
+        # FR-24 AC2+AC3: normalize control characters and whitespace
+        text = _normalize_text(text)
         # Apply masking if provided (FR-15)
         if masking is not None:
             text = mask_text(text, masking)
 
         if para.level > 0:
-            # Indented bullet item (AC2: level=1 deeper than level=0)
+            # Indented bullet item (level=1 deeper than level=0)
             indent = _INDENT_UNIT * para.level
             lines.append(f"{indent}{_BULLET_MARKER}{text}")
         else:
             # Top-level paragraph
             lines.append(text)
 
-    return "\n".join(lines)
+    result = "\n".join(lines)
+    # AC5: collapse 3+ consecutive newlines to at most 2 (one blank line)
+    result = _collapse_blank_lines(result)
+    return result
 
 
 def _render_table(shape: TableShapeIR) -> str:
-    """Render a TableShapeIR as GFM table or Mermaid fallback (AC3, FR-13)."""
+    """Render a TableShapeIR as GFM table or Mermaid fallback (FR-13).
+
+    FR-24 AC4: returns "" when every cell is blank (whitespace-only).
+    Note: _render_table interior is FR-25 scope; only the AC4 blank-table
+    guard is added here.
+    """
+    # AC4 (FR-24): omit tables where all cells are blank
+    if _is_table_all_blank(shape):
+        return ""
+
     if is_complex_table(shape):
         # FR-13 Mermaid fallback
         return table_to_mermaid(shape)
 
-    # GFM pipe table (AC3: header separator included)
+    # GFM pipe table (header separator included)
     rows = shape.rows
     if not rows:
         return ""
@@ -296,7 +403,7 @@ def _render_group(
     slide_num: int = 0,
     img_counter: list[int] | None = None,
 ) -> str:
-    """Render a GroupShapeIR by recursively rendering children in order (AC6).
+    """Render a GroupShapeIR by recursively rendering children in order.
 
     slide_num and img_counter are propagated to children so that image numbers
     are shared across the whole slide (FR-22).
@@ -317,11 +424,80 @@ def _render_group(
 
 
 def _render_other(shape: OtherShapeIR, masking: MaskingOptions | None) -> str:
-    """Render an OtherShapeIR: non-empty fallback_text -> paragraph, else skip (AC8)."""
+    """Render an OtherShapeIR: non-empty fallback_text -> paragraph, else skip."""
     if not shape.fallback_text:
-        # AC8: empty fallback_text -> silently omit
+        # empty fallback_text -> silently omit
         return ""
     text = shape.fallback_text
     if masking is not None:
         text = mask_text(text, masking)
     return text
+
+
+def _suppress_repeated_labels(slide_blocks: list[str]) -> list[str]:
+    """Remove duplicate consecutive section labels across slide blocks (AC6 — FR-24).
+
+    A "section label" is defined as a non-heading, non-empty first line of a
+    slide block that appears identically in the immediately preceding slide
+    block.  Only consecutive duplicates are removed (not all occurrences).
+
+    Pure function. Deterministic (ADR-218). Input list is not mutated.
+
+    Args:
+        slide_blocks: Ordered list of per-slide Markdown strings.
+
+    Returns:
+        New list with repeated consecutive labels suppressed.
+    """
+    if not slide_blocks:
+        return []
+
+    result: list[str] = [slide_blocks[0]]
+    prev_labels: set[str] = _extract_labels(slide_blocks[0])
+
+    for block in slide_blocks[1:]:
+        lines = block.splitlines()
+        # Collect non-heading content lines from this block
+        filtered: list[str] = []
+        skip_next_blank = False
+        for line in lines:
+            # Headings (## ...) are never suppressed
+            if line.startswith("#"):
+                filtered.append(line)
+                skip_next_blank = False
+                continue
+            # Suppress repeated labels (exact strip match)
+            if line.strip() and line.strip() in prev_labels:
+                skip_next_blank = True
+                continue
+            # Optionally skip blank line immediately after a suppressed label
+            if skip_next_blank and not line.strip():
+                skip_next_blank = False
+                continue
+            skip_next_blank = False
+            filtered.append(line)
+
+        result.append("\n".join(filtered))
+        prev_labels = _extract_labels(block)
+
+    return result
+
+
+def _extract_labels(block: str) -> set[str]:
+    """Extract non-heading, non-blank content lines as label candidates.
+
+    Used by _suppress_repeated_labels to build the set of labels seen in
+    the previous slide.
+
+    Args:
+        block: A single slide Markdown string.
+
+    Returns:
+        Set of stripped non-heading, non-empty line texts.
+    """
+    labels: set[str] = set()
+    for line in block.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            labels.add(stripped)
+    return labels
