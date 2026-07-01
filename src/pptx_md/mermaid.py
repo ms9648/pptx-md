@@ -113,6 +113,23 @@ def _has_intrarow_repeated_cells(table: TableShapeIR) -> bool:
     return False
 
 
+def _normalise_cell_text(text: str) -> str:
+    """Normalise cell text for mermaid serialisation (FR-25 AC3).
+
+    Replaces ``\\n`` (newline) and ``\\v`` (vertical-tab) with a single space
+    so that every serialised cell value stays on one line inside the fence.
+    Without this, a cell containing a newline would produce a bare line
+    (not prefixed with ``%%``) inside the mermaid block.
+
+    Args:
+        text: Raw cell text from TableShapeIR.
+
+    Returns:
+        Cell text with all embedded newlines replaced by a single space.
+    """
+    return text.replace("\v", " ").replace("\n", " ")
+
+
 def _is_blank_table(table: TableShapeIR) -> bool:
     """Return True if the table has no rows, or all cells are empty/whitespace.
 
@@ -176,12 +193,12 @@ def table_to_mermaid(table: TableShapeIR) -> str:
 
     # First row treated as headers (AC3: %% prefix enforced on every content line)
     header_cells = rows[0]
-    header_line = " | ".join(header_cells)
+    header_line = " | ".join(_normalise_cell_text(c) for c in header_cells)
     lines.append(f"%% headers: {header_line}")
 
     # Subsequent rows (AC3: every data line starts with %%)
     for row_idx, row in enumerate(rows[1:], start=1):
-        row_line = " | ".join(row)
+        row_line = " | ".join(_normalise_cell_text(c) for c in row)
         lines.append(f"%% row {row_idx}: {row_line}")
 
     lines.append("```")

@@ -66,7 +66,7 @@ class TestAc1CellNewline:
         assert "\x0b" not in md
 
     def test_ac1_row_count_preserved(self) -> None:
-        """ac1: A 3-row table still renders as exactly 3 pipe-table rows (+ separator)."""
+        """ac1: A 3-row table renders as exactly 3 pipe-table rows (+ separator)."""
         rows = [["H1", "H2"], ["a\nb", "c"], ["d", "e"]]
         table = _make_table(rows)
         slide = _slide_with_table(table)
@@ -111,7 +111,7 @@ class TestAc2PipeEscape:
         assert r"\|" in md
 
     def test_ac2_raw_pipe_not_present_as_column_separator(self) -> None:
-        """ac2: After escaping, the cell text a|b appears as a\\|b, not splitting columns."""
+        """ac2: After escaping, cell text a|b appears as a\\|b (no column split)."""
         rows = [["H"], ["val|ue"]]
         table = _make_table(rows)
         slide = _slide_with_table(table)
@@ -153,9 +153,7 @@ class TestAc3MermaidPrefixEnforced:
 
     def test_ac3_all_content_lines_start_with_percent_percent(self) -> None:
         """ac3: Every content line in mermaid block starts with %%."""
-        rows = [["H1", "H2"], ["a", "b"], ["c", "d"]]
-        table = _make_table(rows, n_rows=3, n_cols=2)
-        # Force complex via large cell count
+        # Force complex via large cell count (9 cols > MAX_TABLE_COLS=8)
         big_rows = [["h" + str(c) for c in range(9)] for _ in range(6)]
         big_table = _make_table(big_rows, n_rows=6, n_cols=9)
         result = table_to_mermaid(big_table)
@@ -181,8 +179,6 @@ class TestAc3MermaidPrefixEnforced:
 
     def test_ac3_table_dimension_line_starts_with_percent_percent(self) -> None:
         """ac3: First content line is %% table: NxM."""
-        rows = [["A", "B"]] * 6
-        table = _make_table(rows, n_rows=6, n_cols=2)
         # 12 cells <= 50 and 2 cols — not complex by size; force via merged cells
         merged_rows = [["병합", "병합", "x"]] * 10  # 10*3=30 cells, col adj dup
         merged_table = _make_table(merged_rows, n_rows=10, n_cols=3)
@@ -199,6 +195,43 @@ class TestAc3MermaidPrefixEnforced:
         inner = self._get_fence_content_lines(result)
         bare_lines = [ln for ln in inner if not ln.startswith("%%")]
         assert bare_lines == [], f"Bare lines found: {bare_lines}"
+
+    def test_ac3_merged_cell_with_newline_all_lines_start_percent_percent(
+        self,
+    ) -> None:
+        """ac3: Merged-cell table with newline cells — all fence lines start %%.
+
+        Regression: cell containing \\n would previously produce a bare line
+        inside the mermaid fence that does NOT start with %%.
+        """
+        # Row 0: merged header cells (triggers is_complex_table via intrarow dup)
+        # Row 1: data cell with embedded newline
+        rows = [
+            ["병합", "병합", "헤더"],
+            ["줄1\n줄2", "데이터", "값\v보조"],
+        ]
+        table = _make_table(rows, n_rows=2, n_cols=3)
+        result = table_to_mermaid(table)
+        assert result.startswith("```mermaid"), "Expected mermaid fence"
+        inner = self._get_fence_content_lines(result)
+        assert inner, "mermaid block must have content lines"
+        for line in inner:
+            assert line.startswith(
+                "%%"
+            ), f"Bare line (no %% prefix) found in mermaid fence: {line!r}"
+
+    def test_ac3_newline_in_cell_replaced_by_space_in_mermaid(self) -> None:
+        """ac3: \\n in cell text is replaced with space (not raw newline) in output."""
+        rows = [["H1", "H2"]] + [["a", "b"]] * 51  # 52 rows -> n_rows*n_cols > 50
+        rows[1] = ["line1\nline2", "ok"]
+        table = _make_table(rows, n_rows=52, n_cols=2)
+        result = table_to_mermaid(table)
+        # The serialised cell must contain "line1 line2" (space), not a raw newline
+        assert "line1 line2" in result
+        # And no bare line starting without %% inside the fence
+        inner = self._get_fence_content_lines(result)
+        for line in inner:
+            assert line.startswith("%%"), f"Bare line found: {line!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +298,7 @@ class TestAc5MergedCellPreservation:
         assert is_complex_table(table)
 
     def test_ac5_merged_cell_text_in_mermaid_output(self) -> None:
-        """ac5: All cell texts (including repeated merged text) appear in mermaid output."""
+        """ac5: All cell texts (including repeated merged text) in mermaid output."""
         rows = [["병합", "병합", "x"], ["a", "b", "c"]]
         table = _make_table(rows, n_rows=2, n_cols=3)
         result = table_to_mermaid(table)
@@ -348,7 +381,7 @@ class TestAc6FallbackOptions:
             assert text in md, f"Cell text {text!r} missing from table-data output"
 
     def test_ac6_simple_table_unaffected_by_fallback_option(self) -> None:
-        """ac6: Simple (non-complex) table always renders as GFM regardless of fallback option."""
+        """ac6: Simple (non-complex) table renders as GFM regardless of fallback."""
         rows = [["H1", "H2"], ["a", "b"]]
         table = _make_table(rows)
         slide = _slide_with_table(table)
@@ -359,7 +392,6 @@ class TestAc6FallbackOptions:
 
     def test_ac6_html_escapes_special_chars(self) -> None:
         """ac6: HTML fallback escapes < > & in cell texts."""
-        rows = [["H"], ["<tag> & more"]]
         # Force complex by using merged cells
         rows_complex = [["<tag>", "<tag>", "&"]] + [["a", "b", "c"]] * 2
         table = _make_table(rows_complex, n_rows=3, n_cols=3)
@@ -446,7 +478,7 @@ class TestAc8NoRaise:
     def test_ac8_document_not_aborted_by_bad_table(self) -> None:
         """ac8: One odd table in a document does not abort other slides."""
         from pptx_md.assembler import assemble_document
-        from pptx_md.ir import PresentationIR, TextShapeIR, ParagraphIR
+        from pptx_md.ir import ParagraphIR, PresentationIR, TextShapeIR
 
         odd_table = _make_table([["a"], [], ["b"]], n_rows=3, n_cols=1)
         normal_text = TextShapeIR(
