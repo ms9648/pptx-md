@@ -222,11 +222,11 @@ class TestAc6EmptyTableNoFallback:
         assert not is_complex_table(table)
 
     def test_ac6_empty_table_mermaid_no_exception(self) -> None:
-        """table_to_mermaid on empty table must not raise."""
+        """table_to_mermaid on empty table must not raise and returns "" (FR-25 AC4)."""
         table = _make_table([], n_rows=0, n_cols=0)
         result = table_to_mermaid(table)
-        assert "```mermaid" in result
-        assert "```" in result
+        # FR-25 AC4: empty table -> omit (return empty string, not a mermaid block)
+        assert result == ""
 
     def test_ac6_assembler_empty_table_no_exception(self) -> None:
         """assemble_slide with an empty table must not raise."""

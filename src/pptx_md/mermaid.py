@@ -113,10 +113,48 @@ def _has_intrarow_repeated_cells(table: TableShapeIR) -> bool:
     return False
 
 
+def _normalise_cell_text(text: str) -> str:
+    """Normalise cell text for mermaid serialisation (FR-25 AC3).
+
+    Replaces ``\\n`` (newline) and ``\\v`` (vertical-tab) with a single space
+    so that every serialised cell value stays on one line inside the fence.
+    Without this, a cell containing a newline would produce a bare line
+    (not prefixed with ``%%``) inside the mermaid block.
+
+    Args:
+        text: Raw cell text from TableShapeIR.
+
+    Returns:
+        Cell text with all embedded newlines replaced by a single space.
+    """
+    return text.replace("\v", " ").replace("\n", " ")
+
+
+def _is_blank_table(table: TableShapeIR) -> bool:
+    """Return True if the table has no rows, or all cells are empty/whitespace.
+
+    Used to decide whether to omit the table entirely (FR-25 AC4).
+
+    Args:
+        table: A TableShapeIR instance (read-only).
+
+    Returns:
+        True when the table should be omitted from output.
+    """
+    if not table.rows:
+        return True
+    for row in table.rows:
+        for cell in row:
+            if cell.strip():
+                return False
+    return True
+
+
 def table_to_mermaid(table: TableShapeIR) -> str:
     """Serialise *table* as a fenced ```mermaid block (FR-13, ADR-219 option C).
 
-    The block contains a deterministic header-row text structure:
+    The block contains a deterministic header-row text structure.
+    Every content line inside the fence begins with ``%%`` (FR-25 AC3):
 
         ```mermaid
         %% table: {n_rows}x{n_cols}
@@ -125,9 +163,12 @@ def table_to_mermaid(table: TableShapeIR) -> str:
         %% row 2: val1 | val2 | ...
         ```
 
+    Returns an empty string when *table* is blank (all cells whitespace or no
+    rows — FR-25 AC4).
+
     This is NOT a formal Mermaid diagram (ADR-219 C); the ```mermaid fence is
     used so that downstream LLM pipelines can identify and handle the block.
-    All cell texts are included verbatim (zero data loss).
+    All cell texts are included verbatim (zero data loss, FR-25 AC5/AC7).
 
     Deterministic: identical TableShapeIR -> identical output string (FR-13 AC7).
 
@@ -136,8 +177,12 @@ def table_to_mermaid(table: TableShapeIR) -> str:
 
     Returns:
         A string beginning with ```mermaid and ending with ``` (including
-        surrounding newlines).
+        surrounding newlines), or "" for blank/empty tables (FR-25 AC4).
     """
+    # AC4: omit blank/empty tables entirely — no mermaid block produced
+    if _is_blank_table(table):
+        return ""
+
     rows = table.rows
     n_rows = table.n_rows
     n_cols = table.n_cols
@@ -146,18 +191,15 @@ def table_to_mermaid(table: TableShapeIR) -> str:
     lines.append("```mermaid")
     lines.append(f"%% table: {n_rows}x{n_cols}")
 
-    if rows:
-        # First row treated as headers
-        header_cells = rows[0] if rows else []
-        header_line = " | ".join(header_cells)
-        lines.append(f"%% headers: {header_line}")
+    # First row treated as headers (AC3: %% prefix enforced on every content line)
+    header_cells = rows[0]
+    header_line = " | ".join(_normalise_cell_text(c) for c in header_cells)
+    lines.append(f"%% headers: {header_line}")
 
-        # Subsequent rows
-        for row_idx, row in enumerate(rows[1:], start=1):
-            row_line = " | ".join(row)
-            lines.append(f"%% row {row_idx}: {row_line}")
-    else:
-        lines.append("%% (empty table)")
+    # Subsequent rows (AC3: every data line starts with %%)
+    for row_idx, row in enumerate(rows[1:], start=1):
+        row_line = " | ".join(_normalise_cell_text(c) for c in row)
+        lines.append(f"%% row {row_idx}: {row_line}")
 
     lines.append("```")
     return "\n".join(lines)
