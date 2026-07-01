@@ -41,11 +41,19 @@ class ShapeIR:
     Subclasses: TextShapeIR, TableShapeIR, ImageShapeIR, GroupShapeIR,
     OtherShapeIR.  Direct instantiation is not intended; use a concrete
     subclass.
+
+    Coordinate fields (FR-23): EMU units.  Default 0 preserves backward
+    compatibility — existing callers that omit these fields continue to work
+    (ADR-202: "" / 0 not None).
     """
 
     shape_id: int
     name: str  # "" if absent (ADR-202)
     kind: ShapeKind
+    left: int = 0  # FR-23: left edge in EMU; 0 when absent/None
+    top: int = 0  # FR-23: top edge in EMU; 0 when absent/None
+    width: int = 0  # FR-23: width in EMU; 0 when absent/None
+    height: int = 0  # FR-23: height in EMU; 0 when absent/None
 
 
 @dataclass

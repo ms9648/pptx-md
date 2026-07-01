@@ -81,16 +81,41 @@ def _parse_slide(idx: int, slide: object) -> SlideIR:
     return sld
 
 
+def _extract_coords(shape: object) -> tuple[int, int, int, int]:
+    """Read left/top/width/height from a shape, defaulting None to 0 (FR-23 AC3).
+
+    python-pptx returns EMU integers for these attributes, but some shapes
+    (e.g. placeholders on certain layouts) may return None.  We normalise
+    None -> 0 to keep the IR schema non-nullable (ADR-202).
+
+    Returns:
+        (left, top, width, height) all as int EMU values.
+    """
+
+    def _emu(attr: str) -> int:
+        val = getattr(shape, attr, None)
+        if val is None:
+            return 0
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return 0
+
+    return _emu("left"), _emu("top"), _emu("width"), _emu("height")
+
+
 def _parse_shape(shape: object) -> ShapeIR:
     """Parse one shape into the appropriate ShapeIR subtype (FR-04).
 
     Per-shape failures are caught and demoted to OtherShapeIR (ADR-204).
+    Coordinate fields (FR-23) are always populated; None -> 0 (AC3).
     """
     sid = int(getattr(shape, "shape_id", 0) or 0)
     name = str(getattr(shape, "name", "") or "")
+    left, top, width, height = _extract_coords(shape)
 
     try:
-        return _dispatch_shape(shape, sid, name)
+        ir = _dispatch_shape(shape, sid, name)
     except Exception as exc:  # ADR-204: never propagate per-shape failure
         _log.warning(
             "shape id=%d name=%r parse failed (%s); demoting to OtherShapeIR",
@@ -102,9 +127,20 @@ def _parse_shape(shape: object) -> ShapeIR:
             shape_id=sid,
             name=name,
             kind=ShapeKind.OTHER,
+            left=left,
+            top=top,
+            width=width,
+            height=height,
             mso_shape_type="UNKNOWN",
             fallback_text="",
         )
+
+    # FR-23 AC2: stamp coordinates onto every successfully-parsed IR node
+    ir.left = left
+    ir.top = top
+    ir.width = width
+    ir.height = height
+    return ir
 
 
 def _dispatch_shape(shape: object, sid: int, name: str) -> ShapeIR:
