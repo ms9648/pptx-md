@@ -225,7 +225,7 @@ class TestAc6EmptyTableNoFallback:
         """table_to_mermaid on empty table must not raise and returns "" (FR-25 AC4)."""
         table = _make_table([], n_rows=0, n_cols=0)
         result = table_to_mermaid(table)
-        # FR-25 AC4: blank/empty table -> omit (return empty string, not a mermaid block)
+        # FR-25 AC4: empty table -> omit (return empty string, not a mermaid block)
         assert result == ""
 
     def test_ac6_assembler_empty_table_no_exception(self) -> None:
