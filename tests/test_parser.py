@@ -744,3 +744,112 @@ class TestFR21FooterPlaceholderParsing:
         result = _parse_text(mock_shape, sid=102, name="title_test")
         assert result.is_footer is False
         assert result.is_title is True
+
+
+# ===========================================================================
+# FR-23 (#58): IR 좌표 확장 — 파서 정상 경로 (AC2) / None 방어 (AC3)
+# ===========================================================================
+
+
+class TestFR23CoordinateParsing:
+    """FR-23 (#58): parse_presentation 에서 EMU 좌표 매핑 및 None 방어 검증."""
+
+    def test_ac2_파서_emu_매핑(self, tmp_path: Path) -> None:
+        """ac2_파서_emu_매핑: 도형의 left/top/width/height 가 ShapeIR에 매핑된다."""
+        prs = PptxPresentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[6])  # Blank
+
+        # 명시적 위치로 텍스트박스 추가
+        left_in = Inches(1)
+        top_in = Inches(2)
+        width_in = Inches(3)
+        height_in = Inches(0.5)
+        tb = slide.shapes.add_textbox(left_in, top_in, width_in, height_in)
+        tb.text_frame.text = "coord test"
+
+        buf = io.BytesIO()
+        prs.save(buf)
+        p = tmp_path / "coord_test.pptx"
+        p.write_bytes(buf.getvalue())
+
+        pres = parse_presentation(p)
+        text_shapes = [s for s in pres.slides[0].shapes if isinstance(s, TextShapeIR)]
+        assert len(text_shapes) == 1
+        shape = text_shapes[0]
+
+        # Inches(N) = N * 914400 EMU
+        assert shape.left == int(left_in)
+        assert shape.top == int(top_in)
+        assert shape.width == int(width_in)
+        assert shape.height == int(height_in)
+
+    def test_ac3_파서_none_방어(self, tmp_path: Path) -> None:
+        """ac3_파서_None_방어: shape 좌표가 None 이면 0 으로 채운다."""
+        from unittest.mock import MagicMock
+
+        from pptx_md.parser import _parse_shape
+
+        mock_shape = MagicMock()
+        mock_shape.shape_id = 1
+        mock_shape.name = "mock"
+        mock_shape.shape_type = None
+        mock_shape.has_table = False
+        mock_shape.has_text_frame = True
+        mock_shape.placeholder_format = None
+        mock_shape.text_frame.paragraphs = []
+        # Simulate None coordinates
+        mock_shape.left = None
+        mock_shape.top = None
+        mock_shape.width = None
+        mock_shape.height = None
+
+        ir = _parse_shape(mock_shape)
+        # Must not raise, and all coords must be 0
+        assert ir.left == 0
+        assert ir.top == 0
+        assert ir.width == 0
+        assert ir.height == 0
+
+    def test_ac2_이미지_도형_좌표_매핑(self, tmp_path: Path) -> None:
+        """ac2_이미지_좌표_매핑: 이미지 도형의 좌표도 정확히 매핑된다."""
+        import struct
+        import zlib
+
+        def _make_png() -> bytes:
+            sig = b"\x89PNG\r\n\x1a\n"
+
+            def _chunk(name: bytes, data: bytes) -> bytes:
+                length = struct.pack(">I", len(data))
+                crc = struct.pack(">I", zlib.crc32(name + data) & 0xFFFFFFFF)
+                return length + name + data + crc
+
+            ihdr = _chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+            idat = _chunk(b"IDAT", zlib.compress(b"\x00\xff\xff\xff"))
+            iend = _chunk(b"IEND", b"")
+            return sig + ihdr + idat + iend
+
+        png_file = tmp_path / "t.png"
+        png_file.write_bytes(_make_png())
+
+        prs = PptxPresentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        left_in = Inches(2)
+        top_in = Inches(1)
+        width_in = Inches(4)
+        height_in = Inches(3)
+        slide.shapes.add_picture(str(png_file), left_in, top_in, width_in, height_in)
+
+        buf = io.BytesIO()
+        prs.save(buf)
+        p = tmp_path / "img_coord.pptx"
+        p.write_bytes(buf.getvalue())
+
+        pres = parse_presentation(p)
+        img_shapes = [s for s in pres.slides[0].shapes if isinstance(s, ImageShapeIR)]
+        assert len(img_shapes) == 1
+        img = img_shapes[0]
+
+        assert img.left == int(left_in)
+        assert img.top == int(top_in)
+        assert img.width == int(width_in)
+        assert img.height == int(height_in)

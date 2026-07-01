@@ -392,6 +392,10 @@ def test_ac8_직렬화_dataclasses_asdict() -> None:
         "shape_id": 3,
         "name": "Picture 1",
         "kind": "image",
+        "left": 0,  # FR-23: coordinate fields default 0
+        "top": 0,
+        "width": 0,
+        "height": 0,
         "image_format": "png",
         "image_ext": "png",
         "alt_text": "",
@@ -417,6 +421,10 @@ def test_ac8_직렬화_텍스트_도형_계층() -> None:
         "shape_id": 1,
         "name": "Title 1",
         "kind": "text",
+        "left": 0,  # FR-23: coordinate fields default 0
+        "top": 0,
+        "width": 0,
+        "height": 0,
         "paragraphs": [{"text": "Hello World", "level": 0}],
         "is_title": True,
         "is_footer": False,  # FR-21: new field with default False
@@ -456,3 +464,71 @@ def test_ac8_직렬화_슬라이드_계층() -> None:
     assert d["title"] == "Summary"
     assert d["notes"] == "These are notes"
     assert d["shapes"][0]["mso_shape_type"] == "CHART"
+
+
+# ---------------------------------------------------------------------------
+# FR-23 (#58) — IR 좌표 확장 (AC1)
+# ---------------------------------------------------------------------------
+
+
+class TestFR23CoordinateFields:
+    """FR-23 (#58): ShapeIR 좌표 필드 추가 — AC1"""
+
+    def test_ac1_좌표필드_기본값_zero(self) -> None:
+        """ac1_좌표필드_기본값_zero: ShapeIR 서브클래스를 좌표 인자 없이 생성하면
+        left/top/width/height 모두 0이다."""
+        text = TextShapeIR(shape_id=1, name="T", kind=ShapeKind.TEXT)
+        assert text.left == 0
+        assert text.top == 0
+        assert text.width == 0
+        assert text.height == 0
+
+    def test_ac1_모든_서브클래스_no_TypeError(self) -> None:
+        """ac1_모든_서브클래스_no_TypeError: 5종 서브클래스 모두 좌표 인자 없이
+        TypeError 없이 생성된다."""
+        TextShapeIR(shape_id=1, name="T", kind=ShapeKind.TEXT)
+        TableShapeIR(shape_id=2, name="Tbl", kind=ShapeKind.TABLE)
+        ImageShapeIR(shape_id=3, name="Img", kind=ShapeKind.IMAGE)
+        GroupShapeIR(shape_id=4, name="Grp", kind=ShapeKind.GROUP)
+        OtherShapeIR(shape_id=5, name="Oth", kind=ShapeKind.OTHER)
+
+    def test_ac1_좌표_값_설정_가능(self) -> None:
+        """ac1_좌표_값_설정: 좌표 인자를 명시하면 해당 값이 저장된다."""
+        shape = TextShapeIR(
+            shape_id=1,
+            name="T",
+            kind=ShapeKind.TEXT,
+            left=914400,
+            top=457200,
+            width=4572000,
+            height=1371600,
+        )
+        assert shape.left == 914400
+        assert shape.top == 457200
+        assert shape.width == 4572000
+        assert shape.height == 1371600
+
+    def test_ac1_좌표필드_int_타입(self) -> None:
+        """ac1_좌표필드_타입: 필드 타입은 int 이다."""
+        shape = TextShapeIR(shape_id=1, name="T", kind=ShapeKind.TEXT)
+        assert isinstance(shape.left, int)
+        assert isinstance(shape.top, int)
+        assert isinstance(shape.width, int)
+        assert isinstance(shape.height, int)
+
+    def test_ac1_좌표_asdict_포함(self) -> None:
+        """ac1_직렬화_포함: dataclasses.asdict 결과에 4개 좌표 필드가 포함된다."""
+        shape = OtherShapeIR(
+            shape_id=9,
+            name="O",
+            kind=ShapeKind.OTHER,
+            left=100,
+            top=200,
+            width=300,
+            height=400,
+        )
+        d = dataclasses.asdict(shape)
+        assert d["left"] == 100
+        assert d["top"] == 200
+        assert d["width"] == 300
+        assert d["height"] == 400

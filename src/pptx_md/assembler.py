@@ -53,6 +53,14 @@ _RE_VERTICAL_TAB: re.Pattern[str] = re.compile(r"\v")
 _RE_CONSECUTIVE_SPACES: re.Pattern[str] = re.compile(r"[ \t]{2,}")
 _RE_CONSECUTIVE_BLANK_LINES: re.Pattern[str] = re.compile(r"\n{3,}")
 
+# FR-23: Reading-order sort tolerance (EMU).
+# Shapes whose `top` values differ by less than this are treated as the same
+# visual row and sorted by `left` within that row.
+# 914400 EMU = 0.5 inch ≈ 1.27 cm — a practical "same row" threshold for
+# PowerPoint slides (approximately 13% of standard slide height 6858000 EMU).
+# Using integer floor-division bucketing ensures determinism (ADR-218).
+_ROW_TOLERANCE_EMU: int = 914400
+
 
 # ---------------------------------------------------------------------------
 # Normalization utilities (FR-24: pure functions, input-immutable)
@@ -190,6 +198,24 @@ def assemble_document(
 # ---------------------------------------------------------------------------
 
 
+def _reading_order_key(shape: ShapeIR) -> tuple[int, int]:
+    """Return a sort key for reading-order traversal (FR-23).
+
+    Shapes are first grouped into horizontal rows by floor-dividing `top` by
+    _ROW_TOLERANCE_EMU (bucket index), then sorted left-to-right within each
+    row by `left`.  Python's sorted() is stable, so shapes with identical keys
+    retain their original IR order (AC6, AC7, ADR-218).
+
+    Args:
+        shape: Any ShapeIR instance (uses left/top fields added by FR-23).
+
+    Returns:
+        (row_bucket, left) — both non-negative ints when coordinates are valid.
+    """
+    row_bucket = shape.top // _ROW_TOLERANCE_EMU if _ROW_TOLERANCE_EMU > 0 else 0
+    return (row_bucket, shape.left)
+
+
 def _render_slide(slide: SlideIR, masking: MaskingOptions | None) -> str:
     """Render a single SlideIR to Markdown."""
     parts: list[str] = []
@@ -199,6 +225,8 @@ def _render_slide(slide: SlideIR, masking: MaskingOptions | None) -> str:
     # last resort: ## Slide N
     # AC1 (FR-24): when slide.title is set, also skip any is_title=True shape
     # whose text matches slide.title (strip comparison) to prevent duplicate output.
+    # NOTE: title shape search uses original IR order (heading search is not
+    #       position-dependent; we want the designated title placeholder).
     title_shape_used: TextShapeIR | None = None
     if slide.title:
         parts.append(f"{_SLIDE_HEADING_PREFIX} {slide.title}")
@@ -228,8 +256,12 @@ def _render_slide(slide: SlideIR, masking: MaskingOptions | None) -> str:
     # FR-22: image counter (mutable list used as a reference for group recursion)
     img_counter: list[int] = [0]
 
-    # Shapes in IR order (shapes serialised in IR appearance order)
-    for shape in slide.shapes:
+    # FR-23: sort shapes by reading order (top row first, then left-to-right).
+    # sorted() is stable: equal-key shapes keep their original IR order (AC6/AC7).
+    # IR is read-only — we create a new list, never mutate slide.shapes (ADR-218).
+    ordered_shapes: list[ShapeIR] = sorted(slide.shapes, key=_reading_order_key)
+
+    for shape in ordered_shapes:
         # FR-20 / AC1: skip the shape already used as heading
         if shape is title_shape_used:
             continue

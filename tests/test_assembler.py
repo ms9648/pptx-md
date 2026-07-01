@@ -646,3 +646,104 @@ class TestFR22ImageMarker:
         md = assemble_slide(slide)
         assert "![슬라이드 1 이미지 1]" in md
         assert "![슬라이드 1 이미지 2]" in md
+
+
+# ---------------------------------------------------------------------------
+# FR-23 (#58): Reading-order 정렬 (AC4~AC7)
+# ---------------------------------------------------------------------------
+
+
+def _text_shape_with_coords(
+    text: str,
+    top: int,
+    left: int,
+    shape_id: int,
+) -> TextShapeIR:
+    """Helper: TextShapeIR with explicit EMU coordinates."""
+    return TextShapeIR(
+        shape_id=shape_id,
+        name=f"shape_{shape_id}",
+        kind=ShapeKind.TEXT,
+        paragraphs=[ParagraphIR(text=text, level=0)],
+        left=left,
+        top=top,
+        width=1000000,
+        height=500000,
+    )
+
+
+class TestFR23ReadingOrder:
+    """FR-23 (#58): assemble_slide reading-order 정렬 AC4~AC7"""
+
+    def test_ac4_reading_order_top_정렬(self) -> None:
+        """ac4_reading_order_top_정렬: IR에 하단→상단 역순이어도 출력은 상단 먼저."""
+        # 상단 도형: top=500000, 하단 도형: top=4000000
+        # IR에 하단→상단 역순으로 담음
+        bottom_shape = _text_shape_with_coords(
+            "하단텍스트", top=4000000, left=0, shape_id=2
+        )
+        top_shape = _text_shape_with_coords(
+            "상단텍스트", top=500000, left=0, shape_id=1
+        )
+        slide = SlideIR(index=0, title="T", shapes=[bottom_shape, top_shape])
+        md = assemble_slide(slide)
+        assert md.index("상단텍스트") < md.index("하단텍스트")
+
+    def test_ac5_같은행_left_정렬(self) -> None:
+        """ac5_같은행_left_정렬: tolerance 이내 top 차이이고 IR에 우→좌이면 좌 먼저."""
+        # _ROW_TOLERANCE_EMU = 914400 (0.5 inch)
+        # top이 100000 차이 → 같은 행으로 버킷팅 (tolerance 이내)
+        right_shape = _text_shape_with_coords(
+            "오른쪽텍스트", top=100100, left=3000000, shape_id=2
+        )
+        left_shape = _text_shape_with_coords(
+            "왼쪽텍스트", top=100000, left=500000, shape_id=1
+        )
+        # IR에 오른쪽→왼쪽 역순으로 담음
+        slide = SlideIR(index=0, title="T", shapes=[right_shape, left_shape])
+        md = assemble_slide(slide)
+        assert md.index("왼쪽텍스트") < md.index("오른쪽텍스트")
+
+    def test_ac6_all_zero_순서_보존(self) -> None:
+        """ac6_all_zero_순서_보존: 모든 도형이 left=top=0 이면 IR 순서 그대로."""
+        shape1 = _text_shape_with_coords("첫번째", top=0, left=0, shape_id=1)
+        shape2 = _text_shape_with_coords("두번째", top=0, left=0, shape_id=2)
+        shape3 = _text_shape_with_coords("세번째", top=0, left=0, shape_id=3)
+        slide = SlideIR(index=0, title="T", shapes=[shape1, shape2, shape3])
+        md = assemble_slide(slide)
+        # stable sort 에 의해 동률 좌표는 원 IR 순서 유지
+        assert md.index("첫번째") < md.index("두번째") < md.index("세번째")
+
+    def test_ac7_결정성(self) -> None:
+        """ac7_결정성: 동일 SlideIR 로 assemble_slide 2회 호출 시 완전히 동일."""
+        shape_a = _text_shape_with_coords("A텍스트", top=2000000, left=0, shape_id=1)
+        shape_b = _text_shape_with_coords("B텍스트", top=500000, left=0, shape_id=2)
+        slide = SlideIR(index=0, title="결정성테스트", shapes=[shape_a, shape_b])
+        md1 = assemble_slide(slide)
+        md2 = assemble_slide(slide)
+        assert md1 == md2
+
+    def test_ac4_ir_not_mutated(self) -> None:
+        """ac4_IR_불변: assemble_slide 후 slide.shapes 원본 순서 유지 (IR read-only)."""
+        bottom_shape = _text_shape_with_coords("하단", top=4000000, left=0, shape_id=2)
+        top_shape = _text_shape_with_coords("상단", top=500000, left=0, shape_id=1)
+        original_shapes = [bottom_shape, top_shape]
+        slide = SlideIR(index=0, title="T", shapes=list(original_shapes))
+        assemble_slide(slide)
+        # slide.shapes 순서는 변경되지 않아야 함
+        assert slide.shapes[0] is bottom_shape
+        assert slide.shapes[1] is top_shape
+
+    def test_ac5_다른_행은_top_우선(self) -> None:
+        """ac5_다른_행_top_우선: tolerance를 넘는 top 차이는 다른 행으로 처리."""
+        # top 차이 2000000 > 914400 → 다른 행
+        # 아래 행의 left가 0이어도 위 행이 먼저
+        upper_right = _text_shape_with_coords(
+            "위행오른쪽", top=0, left=4000000, shape_id=1
+        )
+        lower_left = _text_shape_with_coords(
+            "아래행왼쪽", top=2000000, left=0, shape_id=2
+        )
+        slide = SlideIR(index=0, title="T", shapes=[lower_left, upper_right])
+        md = assemble_slide(slide)
+        assert md.index("위행오른쪽") < md.index("아래행왼쪽")

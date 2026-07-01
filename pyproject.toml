@@ -73,5 +73,7 @@ files = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# FR-23: pythonpath ensures tests always import from this worktree's src/
+pythonpath = ["src"]
 # M6: 커버리지 게이트 활성화 (FR-17, ADR-005 / 원 예고: ADR-004)
 addopts = "--cov=src/pptx_md --cov-report=term-missing --cov-fail-under=75"
