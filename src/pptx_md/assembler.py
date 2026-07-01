@@ -16,12 +16,29 @@ Design constraints (ADR-218):
     - No VLM/python-pptx/Pillow imports (NFR-08).
     - Uses mermaid.is_complex_table() for FR-13 Mermaid fallback.
     - masking=None means no masking (opt-in, FR-15).
+
+FR-24 assembler normalizations (AC1–AC8):
+    - slide.title duplicated by is_title shape is suppressed from body (AC1).
+    - Vertical-tab \\v in paragraph text is replaced with \\n (AC2).
+    - Consecutive spaces/tabs in paragraph text are collapsed to one space (AC3).
+    - Blank tables (all cells whitespace) are omitted from output (AC4).
+    - Runs of 3+ consecutive newlines are collapsed to 2 (AC5).
+    - suppress_repeated_labels option removes consecutive duplicate labels (AC6).
+
+FR-25 table integrity (AC1–AC8):
+    - Cells with \\n/\\v are normalised to <br> before GFM rendering (AC1).
+    - Literal | in cells is escaped as \\| to prevent column splitting (AC2).
+    - Blank tables (all cells whitespace) are omitted from output (AC4).
+    - table_to_mermaid fallback options: "table-data" fence or "html" <table> (AC6).
+    - AC7: determinism preserved — no randomness added.
+    - AC8: no raise — non-conforming tables handled gracefully.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from typing import Literal
 
 from pptx_md.ir import (
     GroupShapeIR,
@@ -34,9 +51,17 @@ from pptx_md.ir import (
     TextShapeIR,
 )
 from pptx_md.masking import MaskingOptions, mask_text
-from pptx_md.mermaid import is_complex_table, table_to_mermaid
+from pptx_md.mermaid import (
+    _is_blank_table,
+    _normalise_cell_text,
+    is_complex_table,
+    table_to_mermaid,
+)
 
 __all__ = ["assemble_slide", "assemble_document"]
+
+# Literal type for the complex-table fallback format option (FR-25 AC6)
+TableFallbackFormat = Literal["mermaid", "table-data", "html"]
 
 _logger = logging.getLogger("pptx_md.assembler")
 
@@ -106,19 +131,18 @@ def _collapse_blank_lines(text: str) -> str:
 def _is_table_all_blank(shape: TableShapeIR) -> bool:
     """Return True when every cell text in the table is empty/whitespace (AC4 — FR-24).
 
+    Delegates to mermaid._is_blank_table which handles both no-rows and all-whitespace
+    cases.  Kept here for backward compatibility (test_assembler_fr24.py imports it).
+
     Pure function.  Deterministic (ADR-218).
 
     Args:
         shape: A TableShapeIR instance (read-only).
 
     Returns:
-        True if all cells are blank, False otherwise.
+        True if all cells are blank or table has no rows, False otherwise.
     """
-    for row in shape.rows:
-        for cell in row:
-            if cell.strip():
-                return False
-    return True
+    return _is_blank_table(shape)
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +154,7 @@ def assemble_slide(
     slide: SlideIR,
     *,
     masking: MaskingOptions | None = None,
+    table_fallback: TableFallbackFormat = "mermaid",
 ) -> str:
     """Render one SlideIR into a deterministic Markdown block (FR-11).
 
@@ -139,12 +164,14 @@ def assemble_slide(
     Args:
         slide: A SlideIR instance (read-only).
         masking: Optional MaskingOptions instance (FR-15).
+        table_fallback: Fallback format for complex/merged-cell tables (FR-25 AC6).
+            One of "mermaid" (default, backward-compatible), "table-data", or "html".
 
     Returns:
         A Markdown string representing this slide.  Empty/blank slides return
         an empty string or heading-only string without raising (FR-11 AC7).
     """
-    return _render_slide(slide, masking)
+    return _render_slide(slide, masking, table_fallback=table_fallback)
 
 
 def assemble_document(
@@ -152,6 +179,7 @@ def assemble_document(
     *,
     masking: MaskingOptions | None = None,
     suppress_repeated_labels: bool = False,
+    table_fallback: TableFallbackFormat = "mermaid",
 ) -> str:
     """Map-Reduce assembly of the whole presentation into one document (FR-12).
 
@@ -165,6 +193,8 @@ def assemble_document(
         suppress_repeated_labels: When True, deduplicate consecutive identical
             section labels across slide blocks (AC6 — FR-24).  Default False
             preserves existing behaviour.
+        table_fallback: Fallback format for complex/merged-cell tables (FR-25 AC6).
+            One of "mermaid" (default), "table-data", or "html".
 
     Returns:
         A single Markdown document string.
@@ -175,7 +205,7 @@ def assemble_document(
     slide_blocks: list[str] = []
     for slide in sorted_slides:
         try:
-            block = _render_slide(slide, masking)
+            block = _render_slide(slide, masking, table_fallback=table_fallback)
         except Exception as exc:  # noqa: BLE001 — slide-level isolation
             _logger.warning(
                 "assemble_document: slide index=%d failed, skipping. "
@@ -216,7 +246,12 @@ def _reading_order_key(shape: ShapeIR) -> tuple[int, int]:
     return (row_bucket, shape.left)
 
 
-def _render_slide(slide: SlideIR, masking: MaskingOptions | None) -> str:
+def _render_slide(
+    slide: SlideIR,
+    masking: MaskingOptions | None,
+    *,
+    table_fallback: TableFallbackFormat = "mermaid",
+) -> str:
     """Render a single SlideIR to Markdown."""
     parts: list[str] = []
     slide_num = slide.index + 1
@@ -269,7 +304,11 @@ def _render_slide(slide: SlideIR, masking: MaskingOptions | None) -> str:
         if isinstance(shape, TextShapeIR) and shape.is_footer:
             continue
         rendered = _render_shape(
-            shape, masking, slide_num=slide_num, img_counter=img_counter
+            shape,
+            masking,
+            slide_num=slide_num,
+            img_counter=img_counter,
+            table_fallback=table_fallback,
         )
         if rendered:
             parts.append(rendered)
@@ -283,15 +322,24 @@ def _render_shape(
     *,
     slide_num: int = 0,
     img_counter: list[int] | None = None,
+    table_fallback: TableFallbackFormat = "mermaid",
 ) -> str:
-    """Dispatch to the appropriate renderer; isolate per-shape failures (ADR-220)."""
+    """Dispatch to the appropriate renderer; isolate per-shape failures (ADR-220).
+
+    Args:
+        shape: Any ShapeIR subclass (read-only).
+        masking: Optional masking config (FR-15).
+        slide_num: 1-based slide number for image markers (FR-22).
+        img_counter: Mutable [int] shared across the slide for image numbering.
+        table_fallback: Fallback format for complex tables (FR-25 AC6).
+    """
     if img_counter is None:
         img_counter = [0]
     try:
         if isinstance(shape, TextShapeIR):
             return _render_text(shape, masking)
         if isinstance(shape, TableShapeIR):
-            return _render_table(shape)
+            return _render_table(shape, fallback_format=table_fallback)
         if isinstance(shape, ImageShapeIR):
             img_counter[0] += 1
             return _render_image(
@@ -299,7 +347,11 @@ def _render_shape(
             )
         if isinstance(shape, GroupShapeIR):
             return _render_group(
-                shape, masking, slide_num=slide_num, img_counter=img_counter
+                shape,
+                masking,
+                slide_num=slide_num,
+                img_counter=img_counter,
+                table_fallback=table_fallback,
             )
         if isinstance(shape, OtherShapeIR):
             return _render_other(shape, masking)
@@ -351,39 +403,158 @@ def _render_text(shape: TextShapeIR, masking: MaskingOptions | None) -> str:
     return result
 
 
-def _render_table(shape: TableShapeIR) -> str:
-    """Render a TableShapeIR as GFM table or Mermaid fallback (FR-13).
+def _sanitise_cell(text: str) -> str:
+    """Sanitise a table cell for GFM rendering (FR-25 AC1, AC2).
 
-    FR-24 AC4: returns "" when every cell is blank (whitespace-only).
-    Note: _render_table interior is FR-25 scope; only the AC4 blank-table
-    guard is added here.
+    Applies two transformations in order:
+    1. AC1: replace \\n and \\v (vertical-tab) with <br> so that multiline
+       cell text stays within a single pipe-table row.
+    2. AC2: escape literal ``|`` as ``\\|`` so that the cell boundary is not
+       misinterpreted as a column separator.
+
+    Args:
+        text: Raw cell text from TableShapeIR (read-only).
+
+    Returns:
+        Sanitised cell string safe for inclusion between pipe delimiters.
     """
-    # AC4 (FR-24): omit tables where all cells are blank
-    if _is_table_all_blank(shape):
+    # AC1: normalise newlines — \v (vertical tab, \x0b) and \n both become <br>
+    sanitised = text.replace("\v", "<br>").replace("\n", "<br>")
+    # AC2: escape literal pipe characters
+    sanitised = sanitised.replace("|", r"\|")
+    return sanitised
+
+
+def _table_to_html(shape: TableShapeIR) -> str:
+    """Serialise *shape* as an HTML <table> block (FR-25 AC6 — html fallback option).
+
+    Deterministic: same IR -> same HTML string.  No raise.
+
+    Args:
+        shape: A TableShapeIR instance (read-only).
+
+    Returns:
+        An HTML <table> string, or "" for blank tables.
+    """
+    if _is_blank_table(shape):
+        return ""
+
+    rows = shape.rows
+    html_lines: list[str] = ["<table>"]
+    for row_idx, row in enumerate(rows):
+        html_lines.append("  <tr>")
+        tag = "th" if row_idx == 0 else "td"
+        for cell in row:
+            # Escape HTML special chars minimally (no external deps)
+            escaped = (
+                cell.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            )
+            html_lines.append(f"    <{tag}>{escaped}</{tag}>")
+        html_lines.append("  </tr>")
+    html_lines.append("</table>")
+    return "\n".join(html_lines)
+
+
+def _table_to_table_data(shape: TableShapeIR) -> str:
+    """Serialise *shape* as a ```table-data fenced block (FR-25 AC6).
+
+    Format mirrors the mermaid block but uses a ``table-data`` fence tag so
+    that tooling can distinguish it from a real Mermaid diagram:
+
+        ```table-data
+        table: {n_rows}x{n_cols}
+        headers: col1 | col2 | ...
+        row 1: val1 | val2 | ...
+        ```
+
+    Deterministic: same IR -> same output.  No raise.
+
+    Args:
+        shape: A TableShapeIR instance (read-only).
+
+    Returns:
+        A fenced string, or "" for blank tables.
+    """
+    if _is_blank_table(shape):
+        return ""
+
+    rows = shape.rows
+    n_rows = shape.n_rows
+    n_cols = shape.n_cols
+
+    lines: list[str] = []
+    lines.append("```table-data")
+    lines.append(f"table: {n_rows}x{n_cols}")
+    lines.append("headers: " + " | ".join(_normalise_cell_text(c) for c in rows[0]))
+    for row_idx, row in enumerate(rows[1:], start=1):
+        lines.append(
+            f"row {row_idx}: " + " | ".join(_normalise_cell_text(c) for c in row)
+        )
+    lines.append("```")
+    return "\n".join(lines)
+
+
+def _render_table(
+    shape: TableShapeIR,
+    fallback_format: TableFallbackFormat = "mermaid",
+) -> str:
+    """Render a TableShapeIR as GFM table or complex-table fallback (FR-13, FR-25).
+
+    For GFM rendering (simple tables), cell texts are sanitised:
+    - Newlines (\\n, \\v) -> <br>  (AC1)
+    - Literal | -> \\|            (AC2)
+
+    Blank tables (all cells whitespace) are omitted regardless of format (AC4).
+
+    For complex tables the fallback format is determined by *fallback_format*:
+    - "mermaid"     (default): ```mermaid block (AC6, backward-compatible)
+    - "table-data"           : ```table-data block (AC6)
+    - "html"                 : HTML <table> block (AC6)
+
+    Deterministic (AC7).  No raise (AC8).
+
+    Args:
+        shape: A TableShapeIR instance (read-only).
+        fallback_format: Fallback serialisation format for complex tables.
+
+    Returns:
+        A Markdown/HTML string, or "" for blank tables.
+    """
+    # AC4 (FR-24/FR-25): omit blank tables entirely (checked before complexity decision)
+    if _is_blank_table(shape):
         return ""
 
     if is_complex_table(shape):
-        # FR-13 Mermaid fallback
+        # FR-13 / FR-25 AC6: complex-table fallback
+        if fallback_format == "html":
+            return _table_to_html(shape)
+        if fallback_format == "table-data":
+            return _table_to_table_data(shape)
+        # default: mermaid
         return table_to_mermaid(shape)
 
-    # GFM pipe table (header separator included)
+    # GFM pipe table
     rows = shape.rows
     if not rows:
         return ""
 
     header = rows[0]
+    # AC1+AC2: sanitise header cells
+    sanitised_header = [_sanitise_cell(c) for c in header]
     table_lines: list[str] = []
 
     # Header row
-    table_lines.append("| " + " | ".join(header) + " |")
+    table_lines.append("| " + " | ".join(sanitised_header) + " |")
     # Separator row (one --- per column)
     table_lines.append("| " + " | ".join("---" for _ in header) + " |")
     # Data rows
     for row in rows[1:]:
-        # Pad/truncate row to match header column count
-        padded = list(row) + [""] * (len(header) - len(row))
+        # Pad/truncate row to match header column count (AC8: robustness)
+        padded = list(row) + [""] * max(0, len(header) - len(row))
         padded = padded[: len(header)]
-        table_lines.append("| " + " | ".join(padded) + " |")
+        # AC1+AC2: sanitise each cell
+        sanitised_row = [_sanitise_cell(c) for c in padded]
+        table_lines.append("| " + " | ".join(sanitised_row) + " |")
 
     return "\n".join(table_lines)
 
@@ -434,11 +605,13 @@ def _render_group(
     *,
     slide_num: int = 0,
     img_counter: list[int] | None = None,
+    table_fallback: TableFallbackFormat = "mermaid",
 ) -> str:
     """Render a GroupShapeIR by recursively rendering children in order.
 
     slide_num and img_counter are propagated to children so that image numbers
-    are shared across the whole slide (FR-22).
+    are shared across the whole slide (FR-22).  table_fallback is propagated
+    to nested table shapes (FR-25 AC6).
     """
     if img_counter is None:
         img_counter = [0]
@@ -448,7 +621,11 @@ def _render_group(
         if isinstance(child, TextShapeIR) and child.is_footer:
             continue
         rendered = _render_shape(
-            child, masking, slide_num=slide_num, img_counter=img_counter
+            child,
+            masking,
+            slide_num=slide_num,
+            img_counter=img_counter,
+            table_fallback=table_fallback,
         )
         if rendered:
             child_parts.append(rendered)
