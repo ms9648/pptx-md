@@ -283,3 +283,167 @@ def other_shape_pptx_path() -> Path:
     Created by the fixture generation script; checked into repo (ADR-207).
     """
     return Path(__file__).parent / "fixtures" / "other_shape.pptx"
+
+
+# ---------------------------------------------------------------------------
+# FR-26 (#67): Parser/GraphicFrame coverage fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def pptx_group_three_children(tmp_path: Path) -> bytes:
+    """Single slide with one group containing text + table + image children.
+
+    Built via python-pptx's public ``add_group_shape()`` API (no raw XML
+    needed for this shape mix). Used for: FR-26 AC1.
+    """
+    png_file = tmp_path / "group_child.png"
+    png_file.write_bytes(_PNG_BYTES)
+
+    prs = PptxPresentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+    tb = slide.shapes.add_textbox(Inches(0.5), Inches(0.5), Inches(2), Inches(1))
+    tb.text_frame.text = "group text child"
+    tbl_shape = slide.shapes.add_table(
+        2, 2, Inches(0.5), Inches(2), Inches(3), Inches(1.5)
+    )
+    pic = slide.shapes.add_picture(
+        str(png_file), Inches(4), Inches(0.5), Inches(2), Inches(1.5)
+    )
+
+    slide.shapes.add_group_shape([tb, tbl_shape, pic])
+
+    return _save_to_bytes(prs)
+
+
+@pytest.fixture
+def pptx_nested_group_two_levels() -> bytes:
+    """Single slide with a 2-level nested group: outer > inner > leaf text.
+
+    Outer group also has a sibling leaf text shape, so the tree has
+    5 total ShapeIR nodes (outer group, inner group, leaf text in inner
+    group, sibling text, and the outer group's own node — see test for the
+    exact expected iter_shapes() count). Built via ``add_group_shape()``.
+
+    Used for: FR-26 AC2.
+    """
+    prs = PptxPresentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+    leaf = slide.shapes.add_textbox(Inches(0.5), Inches(0.5), Inches(2), Inches(1))
+    leaf.text_frame.text = "deep leaf text"
+    sibling = slide.shapes.add_textbox(Inches(3), Inches(0.5), Inches(2), Inches(1))
+    sibling.text_frame.text = "outer sibling text"
+
+    inner = slide.shapes.add_group_shape([leaf])
+    slide.shapes.add_group_shape([inner, sibling])
+
+    return _save_to_bytes(prs)
+
+
+@pytest.fixture
+def pptx_chart_with_title() -> bytes:
+    """Single slide with a bar chart that has a chart title set.
+
+    Chart title text lives in the linked chart part's XML (``<a:t>``), not
+    inline in the slide's ``p:graphicFrame`` element — exercises the
+    chart-part-aware branch of fallback text extraction.
+
+    Used for: FR-26 AC5 (positive extraction), AC6 (mso_shape_type=="CHART").
+    """
+    from pptx.chart.data import CategoryChartData  # noqa: PLC0415
+    from pptx.enum.chart import XL_CHART_TYPE  # noqa: PLC0415
+
+    prs = PptxPresentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+    chart_data = CategoryChartData()
+    chart_data.categories = ["Q1", "Q2", "Q3"]
+    chart_data.add_series("Revenue", (10, 20, 30))
+    gframe = slide.shapes.add_chart(
+        XL_CHART_TYPE.COLUMN_CLUSTERED,
+        Inches(1),
+        Inches(1),
+        Inches(4),
+        Inches(3),
+        chart_data,
+    )
+    chart = gframe.chart
+    chart.has_title = True
+    chart.chart_title.text_frame.text = "Sales Chart"
+
+    return _save_to_bytes(prs)
+
+
+@pytest.fixture
+def pptx_smartart_stub() -> bytes:
+    """Single slide with a simplified SmartArt-like GraphicFrame.
+
+    Real SmartArt stores its node text in a separate diagram-data part
+    reached via a relationship, which is expensive to assemble faithfully
+    for a unit-test fixture. Per FR-26 scope, this fixture instead embeds
+    ``<a:t>`` runs directly inside the ``a:graphicData`` element (uri =
+    the DrawingML diagram namespace) as a stand-in for those node captions,
+    to exercise the inline-XML fallback text extraction path without
+    introducing a real diagram-data relationship.
+
+    Used for: FR-26 AC5 (non-chart extraction path), AC6
+    (mso_shape_type=="DIAGRAM").
+    """
+    from lxml import etree  # noqa: PLC0415
+
+    prs = PptxPresentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    sp_tree = slide.shapes._spTree
+
+    xml = (
+        "<p:graphicFrame"
+        ' xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"'
+        ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+        ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        "<p:nvGraphicFramePr>"
+        '<p:cNvPr id="90" name="SmartArt Stub"/>'
+        "<p:cNvGraphicFramePr/>"
+        "<p:nvPr/>"
+        "</p:nvGraphicFramePr>"
+        "<p:xfrm>"
+        '<a:off x="914400" y="914400"/><a:ext cx="1828800" cy="1828800"/>'
+        "</p:xfrm>"
+        "<a:graphic>"
+        '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram">'
+        "<a:p><a:r><a:t>Node Alpha</a:t></a:r></a:p>"
+        "<a:p><a:r><a:t>Node Beta</a:t></a:r></a:p>"
+        "</a:graphicData>"
+        "</a:graphic>"
+        "</p:graphicFrame>"
+    )
+    sp_tree.append(etree.fromstring(xml))
+
+    return _save_to_bytes(prs)
+
+
+@pytest.fixture
+def pptx_images_including_grouped(tmp_path: Path) -> bytes:
+    """Single slide with 3 images total: 2 standalone + 1 inside a group.
+
+    Used for: FR-26 AC8 (no image loss across group nesting).
+    """
+    png_file = tmp_path / "golden.png"
+    png_file.write_bytes(_PNG_BYTES)
+
+    prs = PptxPresentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+    slide.shapes.add_picture(
+        str(png_file), Inches(0.5), Inches(0.5), Inches(2), Inches(1.5)
+    )
+    slide.shapes.add_picture(
+        str(png_file), Inches(3), Inches(0.5), Inches(2), Inches(1.5)
+    )
+    grouped_pic = slide.shapes.add_picture(
+        str(png_file), Inches(0.5), Inches(3), Inches(2), Inches(1.5)
+    )
+    slide.shapes.add_group_shape([grouped_pic])
+
+    return _save_to_bytes(prs)
