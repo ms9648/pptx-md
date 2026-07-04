@@ -59,11 +59,22 @@ class ConvertOptions:
         validate:  When True, validate_markdown() is called after assembly
                    and results are emitted as log warnings.  Return type
                    is always str regardless of this flag (ADR-604).
+        describe_max_workers: Upper bound on concurrent describe() calls
+                   (FR-27 AC7, ADR-608/613). Default 4; clamped internally
+                   to [1, unique_image_count]. Has no effect when
+                   describer is None.
+        diagram_mermaid: When True, DIAGRAM images are described with a
+                   Mermaid-flowchart-requesting hint and the response is
+                   rendered as a fenced flowchart block when structured
+                   (FR-27 AC4/AC5, ADR-611/613). Default False preserves
+                   the pre-M12 plain-text description behaviour.
     """
 
     describer: ImageDescriber | None = None
     masking: MaskingOptions | None = None
     validate: bool = False
+    describe_max_workers: int = 4
+    diagram_mermaid: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +118,12 @@ def convert(
     enrich_images(pres)
 
     # --- Stage 3: enrich descriptions (opt-in via describer, NFR-08) ---
-    enrich_descriptions(pres, opts.describer)
+    enrich_descriptions(
+        pres,
+        opts.describer,
+        max_workers=opts.describe_max_workers,
+        diagram_mermaid=opts.diagram_mermaid,
+    )
 
     # --- Stage 4: assemble Markdown (masking opt-in) ---
     md = assemble_document(pres, masking=opts.masking)

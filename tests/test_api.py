@@ -158,7 +158,7 @@ class TestAc1ConvertReturnsStr:
         def fake_enrich_images(pres: Any) -> None:
             call_log.append("enrich_images")
 
-        def fake_enrich_descriptions(pres: Any, describer: Any) -> None:
+        def fake_enrich_descriptions(pres: Any, describer: Any, **kwargs: Any) -> None:
             call_log.append("enrich_descriptions")
 
         def fake_assemble(pres: Any, *, masking: Any = None) -> str:
@@ -334,9 +334,9 @@ class TestAc4FakeDescriber:
             "pptx_md.description_pipeline", fromlist=["enrich_descriptions"]
         ).enrich_descriptions
 
-        def spy_enrich_descriptions(pres: Any, describer: Any) -> None:
+        def spy_enrich_descriptions(pres: Any, describer: Any, **kwargs: Any) -> None:
             captured.append(describer)
-            original_enrich_descriptions(pres, describer)
+            original_enrich_descriptions(pres, describer, **kwargs)
 
         def fake_parse(path: Any) -> PresentationIR:
             return fake_ir
@@ -402,7 +402,7 @@ class TestAc5MaskingEmail:
         def fake_enrich_images(pres: Any) -> None:
             pass
 
-        def fake_enrich_descriptions(pres: Any, describer: Any) -> None:
+        def fake_enrich_descriptions(pres: Any, describer: Any, **kwargs: Any) -> None:
             pass
 
         opts = ConvertOptions(masking=MaskingOptions(enabled=True))
@@ -432,7 +432,7 @@ class TestAc5MaskingEmail:
         def fake_enrich_images(pres: Any) -> None:
             pass
 
-        def fake_enrich_descriptions(pres: Any, describer: Any) -> None:
+        def fake_enrich_descriptions(pres: Any, describer: Any, **kwargs: Any) -> None:
             pass
 
         def fake_assemble(pres: Any, *, masking: Any = None) -> str:
@@ -507,7 +507,7 @@ class TestAc7EmptyPptxNoException:
         def fake_enrich_images(pres: Any) -> None:
             pass
 
-        def fake_enrich_descriptions(pres: Any, describer: Any) -> None:
+        def fake_enrich_descriptions(pres: Any, describer: Any, **kwargs: Any) -> None:
             pass
 
         def fake_assemble(pres: Any, *, masking: Any = None) -> str:
@@ -566,7 +566,7 @@ class TestAc9ValidateLogging:
         def fake_enrich_images(pres: Any) -> None:
             pass
 
-        def fake_enrich_descriptions(pres: Any, describer: Any) -> None:
+        def fake_enrich_descriptions(pres: Any, describer: Any, **kwargs: Any) -> None:
             pass
 
         def fake_assemble(pres: Any, *, masking: Any = None) -> str:
@@ -606,7 +606,7 @@ class TestAc9ValidateLogging:
         def fake_enrich_images(pres: Any) -> None:
             pass
 
-        def fake_enrich_descriptions(pres: Any, describer: Any) -> None:
+        def fake_enrich_descriptions(pres: Any, describer: Any, **kwargs: Any) -> None:
             pass
 
         def fake_assemble(pres: Any, *, masking: Any = None) -> str:
@@ -646,7 +646,7 @@ class TestAc9ValidateLogging:
         def fake_enrich_images(pres: Any) -> None:
             pass
 
-        def fake_enrich_descriptions(pres: Any, describer: Any) -> None:
+        def fake_enrich_descriptions(pres: Any, describer: Any, **kwargs: Any) -> None:
             pass
 
         def fake_assemble(pres: Any, *, masking: Any = None) -> str:
@@ -688,7 +688,7 @@ class TestAc9ValidateLogging:
         def fake_enrich_images(pres: Any) -> None:
             pass
 
-        def fake_enrich_descriptions(pres: Any, describer: Any) -> None:
+        def fake_enrich_descriptions(pres: Any, describer: Any, **kwargs: Any) -> None:
             pass
 
         def fake_assemble(pres: Any, *, masking: Any = None) -> str:
@@ -713,3 +713,155 @@ class TestAc9ValidateLogging:
             assert isinstance(
                 result, str
             ), f"convert(validate={validate_flag}) must return str"
+
+
+# ---------------------------------------------------------------------------
+# FR-27 (issue #68, ARCH-M12) — ConvertOptions new fields + Stage3 forwarding
+#
+# Test naming: test_ac<N>_fr27_<desc> where <N> matches issue #68's AC
+# numbering (distinct from the FR-16 AC numbering used above in this file).
+# ---------------------------------------------------------------------------
+
+
+class TestFr27ConvertOptions:
+    """FR-27 (issue #68): describe_max_workers / diagram_mermaid fields."""
+
+    def test_ac_fr27_default_값_하위호환(self) -> None:
+        """ARCH-M12 §3.5: new fields default to values equivalent to pre-M12
+        behaviour (describe_max_workers=4, diagram_mermaid=False)."""
+        opts = ConvertOptions()
+        assert opts.describe_max_workers == 4
+        assert opts.diagram_mermaid is False
+
+    def test_ac_fr27_frozen_불변(self) -> None:
+        """ADR-602/613: ConvertOptions remains a frozen dataclass."""
+        import dataclasses
+
+        opts = ConvertOptions()
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            opts.describe_max_workers = 8  # type: ignore[misc]
+
+    def test_ac_fr27_기존_호출_무손상(self, tmp_path: Path) -> None:
+        """ADR-613: ConvertOptions() / convert(src) without new kwargs still work."""
+        pptx_file = tmp_path / "deck.pptx"
+        _save_minimal_pptx(pptx_file)
+
+        result = convert(pptx_file)  # no options at all
+
+        assert isinstance(result, str)
+
+    def test_ac1_ac7_fr27_옵션이_enrich_descriptions로_전달(
+        self, tmp_path: Path
+    ) -> None:
+        """issue AC1/AC7: describe_max_workers/diagram_mermaid are forwarded to
+        enrich_descriptions as keyword arguments by convert()."""
+        pptx_file = tmp_path / "deck.pptx"
+        _save_minimal_pptx(pptx_file)
+
+        fake_ir = _make_ir_with_image()
+        captured: dict[str, Any] = {}
+
+        def fake_parse(path: Any) -> PresentationIR:
+            return fake_ir
+
+        def fake_enrich_images(pres: Any) -> None:
+            pass
+
+        def spy_enrich_descriptions(
+            pres: Any,
+            describer: Any,
+            *,
+            max_workers: int = 4,
+            diagram_mermaid: bool = False,
+        ) -> None:
+            captured["max_workers"] = max_workers
+            captured["diagram_mermaid"] = diagram_mermaid
+
+        opts = ConvertOptions(describe_max_workers=2, diagram_mermaid=True)
+
+        with (
+            patch("pptx_md.api.parse_presentation", fake_parse),
+            patch("pptx_md.api.enrich_images", fake_enrich_images),
+            patch("pptx_md.api.enrich_descriptions", spy_enrich_descriptions),
+        ):
+            convert(pptx_file, options=opts)
+
+        assert captured == {"max_workers": 2, "diagram_mermaid": True}
+
+
+class TestAc1Fr27EndToEndDescriber:
+    """issue AC1: mock describer 주입 -> description 채워짐 + Markdown 본문 포함."""
+
+    def test_ac1_fr27_mock_describer_주입_markdown_본문_포함(
+        self, tmp_path: Path
+    ) -> None:
+        """issue AC1: real enrich_descriptions pipeline fills description and
+        the text flows into the final Markdown body."""
+        pptx_file = tmp_path / "deck.pptx"
+        _save_minimal_pptx(pptx_file)
+
+        fake_ir = _make_ir_with_image(image_bytes=b"\x89PNG_AC1_FR27")
+
+        class MockDescriber:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def describe(
+                self, image_bytes: bytes, image_ext: str, shape_hint: str | None
+            ) -> str:
+                self.calls += 1
+                return "issue AC1 description text"
+
+        mock_describer = MockDescriber()
+
+        def fake_parse(path: Any) -> PresentationIR:
+            return fake_ir
+
+        def fake_enrich_images(pres: Any) -> None:
+            pass
+
+        opts = ConvertOptions(describer=mock_describer)
+
+        with (
+            patch("pptx_md.api.parse_presentation", fake_parse),
+            patch("pptx_md.api.enrich_images", fake_enrich_images),
+        ):
+            result = convert(pptx_file, options=opts)
+
+        assert mock_describer.calls == 1
+        # the image shape from fake_ir must have its description filled in-place
+        image_shape = fake_ir.slides[0].shapes[1]
+        assert image_shape.description == "issue AC1 description text"
+        assert "issue AC1 description text" in result
+
+
+class TestAc8Fr27DeterministicGoldenRegression:
+    """issue AC8: 고정 VLM mock, 동일 PPTX 2회 변환 -> Markdown 바이트 동일."""
+
+    def test_ac8_fr27_동일_pptx_2회_변환_바이트_동일(self, tmp_path: Path) -> None:
+        pptx_file = tmp_path / "deck.pptx"
+        _save_minimal_pptx(pptx_file)
+
+        def _fresh_ir() -> PresentationIR:
+            return _make_ir_with_image(image_bytes=b"\x89PNG_GOLDEN_FIXED")
+
+        describer = MagicMock()
+        describer.describe.return_value = "a fixed golden vlm description"
+
+        def fake_enrich_images(pres: Any) -> None:
+            pass
+
+        opts = ConvertOptions(describer=describer, describe_max_workers=4)
+
+        outputs: list[str] = []
+        for _ in range(2):
+            with (
+                patch(
+                    "pptx_md.api.parse_presentation",
+                    lambda path, _ir=_fresh_ir: _ir(),
+                ),
+                patch("pptx_md.api.enrich_images", fake_enrich_images),
+            ):
+                outputs.append(convert(pptx_file, options=opts))
+
+        assert outputs[0].encode("utf-8") == outputs[1].encode("utf-8")
