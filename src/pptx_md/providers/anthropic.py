@@ -13,15 +13,20 @@ API key, image bytes, prompt body, and VLM response text are NEVER logged
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pptx_md.errors import DescribeError, InstallationError
+
+if TYPE_CHECKING:  # pragma: no cover — type-only, never imported at runtime
+    from anthropic.types import ImageBlockParam, MessageParam, TextBlockParam
 
 __all__ = ["AnthropicDescriber"]
 
 _logger = logging.getLogger("pptx_md.providers.anthropic")
 
 _DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+
+_MediaType = Literal["image/png", "image/jpeg", "image/gif", "image/webp"]
 
 
 def _build_prompt(shape_hint: str | None, alt_text: str) -> str:
@@ -110,14 +115,14 @@ class AnthropicDescriber:
         """
         import base64  # stdlib
 
-        media_type_map: dict[str, str] = {
+        media_type_map: dict[str, _MediaType] = {
             "png": "image/png",
             "jpg": "image/jpeg",
             "jpeg": "image/jpeg",
             "gif": "image/gif",
             "webp": "image/webp",
         }
-        media_type = media_type_map.get(image_ext.lower(), "image/png")
+        media_type: _MediaType = media_type_map.get(image_ext.lower(), "image/png")
 
         prompt_text = _build_prompt(shape_hint, "")
         image_data = base64.standard_b64encode(image_bytes).decode("ascii")
@@ -129,29 +134,28 @@ class AnthropicDescriber:
             len(image_bytes),
         )
 
+        image_block: ImageBlockParam = {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": image_data,
+            },
+        }
+        text_block: TextBlockParam = {
+            "type": "text",
+            "text": prompt_text,
+        }
+        message: MessageParam = {
+            "role": "user",
+            "content": [image_block, text_block],
+        }
+
         try:
             response = self._client.messages.create(
                 model=self._model,
                 max_tokens=1024,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": media_type,
-                                    "data": image_data,
-                                },
-                            },
-                            {
-                                "type": "text",
-                                "text": prompt_text,
-                            },
-                        ],
-                    }
-                ],
+                messages=[message],
             )
         except Exception as exc:
             # Wrap all SDK/network failures — never expose key or image_bytes
