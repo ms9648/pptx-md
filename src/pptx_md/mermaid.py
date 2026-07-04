@@ -1,26 +1,38 @@
-"""Mermaid fallback serialisation for complex tables (FR-13, ADR-219).
+"""Mermaid serialisation — complex-table fallback (FR-13) and diagram flowchart
+extraction (FR-27, ADR-611/612).
 
 When a table exceeds the Markdown-table complexity threshold, this module
 serialises it as a ```mermaid fenced code block containing a deterministic
 header-row text structure (ADR-219 option C: not a formal graph diagram,
 optimised for LLM consumption with zero data loss).
 
+M12 (issue #68) additionally adds a diagram concern: a hint suffix that asks
+a VLM to emit a Mermaid flowchart code block, and a pure extractor/validator
+that pulls a well-formed ```mermaid flowchart fence out of the VLM response
+text (ADR-611/612). These two concerns share this module because they are
+both "Mermaid serialisation" -- the table symbols below are unchanged.
+
 Public interface:
     MAX_TABLE_CELLS: int  -- named constant (FR-13 AC8)
     MAX_TABLE_COLS:  int  -- named constant (FR-13 AC8)
     is_complex_table(table: TableShapeIR) -> bool
     table_to_mermaid(table: TableShapeIR) -> str
+    DIAGRAM_HINT_SUFFIX: str  -- prompt suffix requesting a Mermaid flowchart
+    render_diagram_mermaid(vlm_text: str) -> str | None  -- fence extract/validate
 
 Design constraints:
-    - Deterministic: same input -> same output (FR-13 AC7, ADR-219).
+    - Deterministic: same input -> same output (FR-13 AC7, ADR-219; FR-27 AC8).
     - Pure functions, no side effects.
     - No raise: all errors are handled gracefully.
     - Imports pptx_md.ir for TableShapeIR (per issue #35 task scope §1).
+    - NO VLM SDK import anywhere in this module (NFR-08). New imports for
+      FR-27 are stdlib only (``re``).
 """
 
 from __future__ import annotations
 
 import logging
+import re
 
 from pptx_md.ir import TableShapeIR
 
@@ -29,6 +41,8 @@ __all__ = [
     "MAX_TABLE_COLS",
     "is_complex_table",
     "table_to_mermaid",
+    "DIAGRAM_HINT_SUFFIX",
+    "render_diagram_mermaid",
 ]
 
 _logger = logging.getLogger("pptx_md.mermaid")
@@ -203,3 +217,72 @@ def table_to_mermaid(table: TableShapeIR) -> str:
 
     lines.append("```")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Diagram flowchart extraction (FR-27, ADR-611/612)
+# ---------------------------------------------------------------------------
+
+#: Prompt suffix requesting a Mermaid flowchart code block from the VLM
+#: (FR-27 AC4).  Appended to the DIAGRAM ``shape_hint`` when
+#: ``diagram_mermaid`` is enabled (§3.4 ARCH-M12). Kept as a module constant
+#: for tuning traceability.
+DIAGRAM_HINT_SUFFIX: str = (
+    "If this is a flowchart or process diagram, additionally output the"
+    " structure as a Mermaid 'flowchart TD' code block fenced with"
+    " ```mermaid."
+)
+
+# Extracts the body of the *first* ```mermaid ... ``` fenced block.
+_MERMAID_FENCE_RE = re.compile(r"```mermaid\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+
+# A flowchart body must start with a recognised Mermaid flowchart keyword.
+_FLOWCHART_KEYWORD_RE = re.compile(r"^(flowchart|graph)\b", re.IGNORECASE)
+
+
+def render_diagram_mermaid(vlm_text: str) -> str | None:
+    """Extract and validate a Mermaid flowchart fence from *vlm_text* (FR-27 AC4/AC5).
+
+    Looks for a ```mermaid fenced code block whose first non-blank line
+    starts with a flowchart keyword (``flowchart`` or ``graph``) and whose
+    body is non-empty. On success, returns the fence normalised (surrounding
+    blank lines trimmed, trailing whitespace stripped from each line).
+
+    Returns ``None`` when no fence is present, the first line does not start
+    with a flowchart keyword, or the body is blank — callers must fall back
+    to the original response text in that case (AC5, zero content loss).
+
+    Pure and deterministic: identical input -> identical output (ADR-611).
+    Never raises.
+
+    Args:
+        vlm_text: Raw text returned by an ``ImageDescriber`` provider.
+
+    Returns:
+        A normalised ``str`` beginning with ` ```mermaid` and ending with
+        ` ``` `, or ``None`` if the response is not a valid flowchart fence.
+    """
+    match = _MERMAID_FENCE_RE.search(vlm_text)
+    if match is None:
+        _logger.debug("render_diagram_mermaid: no mermaid fence found -> None")
+        return None
+
+    body = match.group(1)
+    lines = [line.rstrip() for line in body.strip("\n").splitlines()]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+
+    if not lines:
+        _logger.debug("render_diagram_mermaid: fence body blank -> None")
+        return None
+
+    if not _FLOWCHART_KEYWORD_RE.match(lines[0].strip()):
+        _logger.debug(
+            "render_diagram_mermaid: first line not a flowchart keyword -> None"
+        )
+        return None
+
+    normalised_body = "\n".join(lines)
+    return f"```mermaid\n{normalised_body}\n```"
