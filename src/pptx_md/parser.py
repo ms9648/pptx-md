@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 from pptx import Presentation as _PptxPresentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
@@ -32,6 +33,13 @@ from pptx_md.ir import (
 )
 
 _log = logging.getLogger("pptx_md.parser")
+
+# FR-26: Chart/SmartArt GraphicFrame best-effort text/type extraction.
+_A_T_QN = "{http://schemas.openxmlformats.org/drawingml/2006/main}t"
+_A_GRAPHICDATA_QN = "{http://schemas.openxmlformats.org/drawingml/2006/main}graphicData"
+_C_V_QN = "{http://schemas.openxmlformats.org/drawingml/2006/chart}v"
+_C_STRCACHE_QN = "{http://schemas.openxmlformats.org/drawingml/2006/chart}strCache"
+_DIAGRAM_GRAPHIC_DATA_URI = "http://schemas.openxmlformats.org/drawingml/2006/diagram"
 
 
 def parse_presentation(path: str | Path) -> PresentationIR:
@@ -317,12 +325,19 @@ def _parse_group(shape: object, sid: int, name: str) -> GroupShapeIR:
 
 
 def _parse_other(shape: object, sid: int, name: str) -> OtherShapeIR:
-    """Fallback for unrecognised/unsupported shapes (FR-04 AC6, ADR-204)."""
+    """Fallback for unrecognised/unsupported shapes (FR-04 AC6, ADR-204).
+
+    Chart/SmartArt GraphicFrame shapes are best-effort enriched (FR-26 AC5/AC6):
+    ``mso_shape_type`` carries the real MSO/graphic-frame label instead of
+    "UNKNOWN" when it can be determined, and ``fallback_text`` captures any
+    recoverable text (chart titles, cached category/series labels, or inline
+    diagram text runs) instead of always being "".
+    """
     shape_type = getattr(shape, "shape_type", None)
     if shape_type is not None:
         mso_label = str(getattr(shape_type, "name", str(shape_type)))
     else:
-        mso_label = "UNKNOWN"
+        mso_label = _graphic_frame_type_label(shape) or "UNKNOWN"
 
     # Best-effort text extraction from any text_frame that might be present
     fallback_text = ""
@@ -334,6 +349,11 @@ def _parse_other(shape: object, sid: int, name: str) -> OtherShapeIR:
             except Exception:  # noqa: BLE001
                 fallback_text = ""
 
+    # FR-26 AC5: Chart/SmartArt GraphicFrame shapes have has_text_frame==False,
+    # so fall back to XML-level extraction (chart part / inline diagram runs).
+    if not fallback_text:
+        fallback_text = _extract_graphic_frame_fallback_text(shape)
+
     return OtherShapeIR(
         shape_id=sid,
         name=name,
@@ -341,6 +361,88 @@ def _parse_other(shape: object, sid: int, name: str) -> OtherShapeIR:
         mso_shape_type=mso_label,
         fallback_text=fallback_text,
     )
+
+
+def _graphic_frame_type_label(shape: object) -> str | None:
+    """Best-effort MSO type label for a GraphicFrame shape (FR-26 AC6).
+
+    python-pptx's ``GraphicFrame.shape_type`` returns None for content it
+    does not specifically recognise (notably SmartArt/diagram), leaving
+    ``_parse_other`` no label to record. This inspects the shape's own
+    ``a:graphicData/@uri`` to distinguish a SmartArt diagram from any other
+    unrecognised graphic-frame content.
+
+    Returns None if the shape has no graphicData (i.e. is not a
+    GraphicFrame-like element) or the uri cannot be read; the caller falls
+    back to "UNKNOWN" in that case.
+    """
+    element = getattr(shape, "element", None)
+    if element is None:
+        return None
+    try:
+        graphic_data = element.find(f".//{_A_GRAPHICDATA_QN}")
+    except Exception:  # noqa: BLE001
+        return None
+    if graphic_data is None:
+        return None
+    uri = str(graphic_data.get("uri", "") or "")
+    if uri == _DIAGRAM_GRAPHIC_DATA_URI:
+        return "DIAGRAM"
+    if uri:
+        return "GRAPHIC_FRAME"
+    return None
+
+
+def _extract_graphic_frame_fallback_text(shape: object) -> str:
+    """Best-effort text extraction for Chart/SmartArt GraphicFrame shapes (FR-26 AC5).
+
+    Walks the shape's own XML subtree for ``<a:t>`` runs, which covers inline
+    text such as simplified SmartArt fixtures. For charts, python-pptx stores
+    the actual chart XML in a related part (not inline in the graphicFrame
+    element itself), so the linked chart's XML is also walked for ``<a:t>``
+    (titles, data labels) and cached category/series strings (``<c:v>``
+    inside ``<c:strCache>``).
+
+    Any failure (missing relationship, malformed XML, etc.) is absorbed and
+    "" is returned — this function never raises (ADR-204).
+    """
+    texts: list[str] = []
+
+    def _collect_a_t(elem: Any) -> None:
+        try:
+            for t in elem.iter(_A_T_QN):
+                if t.text and t.text.strip():
+                    texts.append(t.text.strip())
+        except Exception:  # noqa: BLE001
+            pass
+
+    element = getattr(shape, "element", None)
+    if element is not None:
+        _collect_a_t(element)
+
+    if getattr(shape, "has_chart", False):
+        chart_element: Any = None
+        try:
+            chart_element = getattr(shape, "chart").element
+        except Exception:  # noqa: BLE001
+            chart_element = None
+        if chart_element is not None:
+            _collect_a_t(chart_element)
+            try:
+                for strcache in chart_element.iter(_C_STRCACHE_QN):
+                    for v in strcache.iter(_C_V_QN):
+                        if v.text and v.text.strip():
+                            texts.append(v.text.strip())
+            except Exception:  # noqa: BLE001
+                pass
+
+    seen: set[str] = set()
+    unique: list[str] = []
+    for t in texts:
+        if t not in seen:
+            seen.add(t)
+            unique.append(t)
+    return " ".join(unique)
 
 
 # ---------------------------------------------------------------------------
