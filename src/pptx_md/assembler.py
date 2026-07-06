@@ -7,6 +7,11 @@ Public interface:
         *,
         masking: MaskingOptions | None = None,
         suppress_repeated_labels: bool = False,
+        table_fallback: TableFallbackFormat = "mermaid",
+        heading_hierarchy: bool = False,
+        emit_toc: bool = False,
+        emit_frontmatter: bool = False,
+        include_notes: bool = False,
     ) -> str
 
 Design constraints (ADR-218):
@@ -32,14 +37,29 @@ FR-25 table integrity (AC1–AC8):
     - table_to_mermaid fallback options: "table-data" fence or "html" <table> (AC6).
     - AC7: determinism preserved — no randomness added.
     - AC8: no raise — non-conforming tables handled gracefully.
+
+FR-28 structured output (AC1–AC4, ARCH-Wave3 §3.1/§3.2, issue #77 — opt-in,
+all default False so existing behaviour/output is byte-identical, AC3):
+    - heading_hierarchy: decompose a '>'-separated slide title into a
+      '##'/'###'/'####'... heading chain (heading.render_heading_lines).
+    - emit_toc: convert slides whose rendered body is empty besides the
+      heading (heading.is_body_empty, D-4) into a TOC-style heading-only
+      block (real title) or drop the block entirely (fallback "## Slide N"
+      title), so that no empty "## Slide N" block is ever emitted (AC4).
+    - emit_frontmatter / include_notes: seam calls into metadata.py /
+      notes.py (owned by issues #78/#79).  Both modules are currently
+      minimal no-op stubs, so these two options have no visible effect
+      yet — the seam only attaches non-empty output (§3.3/§3.6).
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from typing import Literal
 
+from pptx_md.heading import is_body_empty, render_heading_lines
 from pptx_md.ir import (
     GroupShapeIR,
     ImageShapeIR,
@@ -57,6 +77,13 @@ from pptx_md.mermaid import (
     is_complex_table,
     table_to_mermaid,
 )
+from pptx_md.metadata import (
+    build_frontmatter,
+    build_slide_comment,
+    derive_has_diagram,
+    derive_section,
+)
+from pptx_md.notes import render_notes_block
 
 __all__ = ["assemble_slide", "assemble_document"]
 
@@ -85,6 +112,39 @@ _RE_CONSECUTIVE_BLANK_LINES: re.Pattern[str] = re.compile(r"\n{3,}")
 # PowerPoint slides (approximately 13% of standard slide height 6858000 EMU).
 # Using integer floor-division bucketing ensures determinism (ADR-218).
 _ROW_TOLERANCE_EMU: int = 914400
+
+
+# ---------------------------------------------------------------------------
+# FR-28 structured render result (ARCH-Wave3 §3.1, ADR-615/616/621)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _RenderedSlide:
+    """Structured render result for one slide, prior to block assembly.
+
+    Produced by `_render_slide_structured` and consumed by both
+    `assemble_slide` (off-path, byte-identical) and `assemble_document`
+    (TOC/frontmatter/notes seams, ARCH-Wave3 §3.1).
+
+    Attributes:
+        heading_lines: Rendered heading line(s) — a single "## {title}"
+            (or "## Slide N" fallback) when heading_hierarchy=False/no
+            path separator, or multiple "##"/"###"/... lines when
+            decomposed (FR-28 AC1/AC2).
+        body_parts: Rendered body parts, heading excluded, in the same
+            order as the pre-Wave-3 `_render_slide` parts[1:].
+        title_is_fallback: True when no real title was available and the
+            positional "## Slide N" fallback heading was used (ARCH-Wave3
+            §3.2 — fallback-empty slides are dropped under emit_toc).
+        slide: The source SlideIR (read-only; used by metadata/notes seams
+            for index/notes/shapes derivation).
+    """
+
+    heading_lines: list[str]
+    body_parts: list[str]
+    title_is_fallback: bool
+    slide: SlideIR
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +231,15 @@ def assemble_slide(
         A Markdown string representing this slide.  Empty/blank slides return
         an empty string or heading-only string without raising (FR-11 AC7).
     """
-    return _render_slide(slide, masking, table_fallback=table_fallback)
+    # heading_hierarchy is always False here: assemble_slide's public
+    # signature is unchanged by FR-28 (only assemble_document gained the
+    # 4 new keyword-only options) — render_heading_lines(hierarchy=False)
+    # produces the exact pre-Wave-3 "## {title}" line, so this stays
+    # byte-identical to the previous single-pass implementation.
+    rendered = _render_slide_structured(
+        slide, masking, table_fallback=table_fallback, heading_hierarchy=False
+    )
+    return "\n\n".join(rendered.heading_lines + rendered.body_parts)
 
 
 def assemble_document(
@@ -180,12 +248,20 @@ def assemble_document(
     masking: MaskingOptions | None = None,
     suppress_repeated_labels: bool = False,
     table_fallback: TableFallbackFormat = "mermaid",
+    heading_hierarchy: bool = False,
+    emit_toc: bool = False,
+    emit_frontmatter: bool = False,
+    include_notes: bool = False,
 ) -> str:
     """Map-Reduce assembly of the whole presentation into one document (FR-12).
 
     Map: assemble_slide per slide (sequential, ADR-220).
     Reduce: join with a slide separator, in IR list order.
     Deterministic and order-preserving (ADR-220).
+
+    FR-28 opt-in structured output (ARCH-Wave3 §3.1/§3.2/§3.3/§3.6, issue
+    #77 — all four options default to False, which preserves the exact
+    pre-Wave-3 output byte-for-byte, AC3):
 
     Args:
         presentation: A PresentationIR instance (read-only).
@@ -195,6 +271,22 @@ def assemble_document(
             preserves existing behaviour.
         table_fallback: Fallback format for complex/merged-cell tables (FR-25 AC6).
             One of "mermaid" (default), "table-data", or "html".
+        heading_hierarchy: When True, decompose a '>'-separated slide title
+            into a "##"/"###"/"####"... heading chain (FR-28 AC1/AC2).
+            Default False preserves the single "## {title}" heading.
+        emit_toc: When True, slides whose rendered body is empty besides
+            the heading (D-4) are converted to a heading-only TOC block
+            (real title) or dropped entirely (fallback "## Slide N"
+            title) so that no empty "## Slide N" block is ever emitted
+            (FR-28 AC4). Default False preserves existing behaviour.
+        emit_frontmatter: When True, attaches a document-level YAML
+            frontmatter block and per-slide HTML-comment metadata via the
+            metadata.py seam (FR-28 AC5-AC7, owned by issue #78). Default
+            False; currently a no-op until #78 fills in metadata.py.
+        include_notes: When True, attaches a "> notes" blockquote per
+            slide via the notes.py seam (FR-28 AC8/AC9, owned by issue
+            #79). Default False; currently a no-op until #79 fills in
+            notes.py.
 
     Returns:
         A single Markdown document string.
@@ -205,7 +297,12 @@ def assemble_document(
     slide_blocks: list[str] = []
     for slide in sorted_slides:
         try:
-            block = _render_slide(slide, masking, table_fallback=table_fallback)
+            rendered = _render_slide_structured(
+                slide,
+                masking,
+                table_fallback=table_fallback,
+                heading_hierarchy=heading_hierarchy,
+            )
         except Exception as exc:  # noqa: BLE001 — slide-level isolation
             _logger.warning(
                 "assemble_document: slide index=%d failed, skipping. "
@@ -214,13 +311,75 @@ def assemble_document(
                 len(slide.shapes),
                 type(exc).__name__,
             )
-            block = f"{_SLIDE_HEADING_PREFIX} Slide {slide.index + 1}"
+            # Preserve the legacy fallback string exactly (bypasses the
+            # TOC/frontmatter/notes seams — matches pre-Wave-3 behaviour).
+            slide_blocks.append(f"{_SLIDE_HEADING_PREFIX} Slide {slide.index + 1}")
+            continue
+
+        block_parts = _build_slide_block_parts(rendered, emit_toc=emit_toc)
+        if block_parts is None:
+            # ARCH-Wave3 §3.2: emit_toc dropped this fallback-empty slide —
+            # no block is emitted at all (FR-28 AC4: 0 empty blocks).
+            continue
+
+        if include_notes:
+            notes_block = render_notes_block(rendered.slide.notes)
+            if notes_block:
+                block_parts.append(notes_block)
+
+        block = "\n\n".join(block_parts)
+
+        if emit_frontmatter:
+            section = derive_section(rendered.heading_lines)
+            has_diagram = derive_has_diagram(rendered.slide)
+            comment = build_slide_comment(
+                rendered.slide.index + 1, section, has_diagram
+            )
+            if comment:
+                block = f"{comment}\n{block}"
+
         slide_blocks.append(block)
 
     if suppress_repeated_labels:
         slide_blocks = _suppress_repeated_labels(slide_blocks)
 
-    return _SLIDE_SEPARATOR.join(slide_blocks)
+    document = _SLIDE_SEPARATOR.join(slide_blocks)
+
+    if emit_frontmatter:
+        frontmatter = build_frontmatter(presentation)
+        if frontmatter:
+            document = f"{frontmatter}\n\n{document}"
+
+    return document
+
+
+def _build_slide_block_parts(
+    rendered: _RenderedSlide, *, emit_toc: bool
+) -> list[str] | None:
+    """Decide the emitted block content for one rendered slide (FR-28 AC4).
+
+    ARCH-Wave3 §3.2 (D-4 판정, ADR-616):
+        - body not empty -> normal block (heading + body), unchanged.
+        - emit_toc & body empty & real title -> heading-only block (TOC
+          entry / section divider).
+        - emit_toc & body empty & fallback title ("## Slide N") -> drop
+          the block entirely (returns None) so that 0 empty "## Slide N"
+          blocks are ever emitted.
+        - emit_toc=False -> normal block, unchanged (backward-compatible).
+
+    Args:
+        rendered: The structured render result for one slide.
+        emit_toc: FR-28 emit_toc option value.
+
+    Returns:
+        The list of Markdown parts to join for this slide's block, or
+        None when the block should be dropped entirely.
+    """
+    if not emit_toc or not is_body_empty(rendered.body_parts):
+        return list(rendered.heading_lines) + list(rendered.body_parts)
+    if rendered.title_is_fallback:
+        return None
+    return list(rendered.heading_lines)
 
 
 # ---------------------------------------------------------------------------
@@ -246,14 +405,33 @@ def _reading_order_key(shape: ShapeIR) -> tuple[int, int]:
     return (row_bucket, shape.left)
 
 
-def _render_slide(
+def _render_slide_structured(
     slide: SlideIR,
     masking: MaskingOptions | None,
     *,
     table_fallback: TableFallbackFormat = "mermaid",
-) -> str:
-    """Render a single SlideIR to Markdown."""
-    parts: list[str] = []
+    heading_hierarchy: bool = False,
+) -> _RenderedSlide:
+    """Render a single SlideIR into a structured `_RenderedSlide` (ARCH-Wave3 §3.1).
+
+    Splits the pre-Wave-3 `_render_slide` into a heading-line list and a
+    body-part list so that `assemble_document` can apply the FR-28
+    TOC/frontmatter/notes seams without re-parsing rendered Markdown.
+    `assemble_slide` (off-path) re-joins heading_lines + body_parts with
+    "\\n\\n", which is byte-identical to the pre-Wave-3 single-pass output
+    when heading_hierarchy=False (AC3).
+
+    Args:
+        slide: A SlideIR instance (read-only).
+        masking: Optional masking config (FR-15).
+        table_fallback: Fallback format for complex tables (FR-25 AC6).
+        heading_hierarchy: Decompose a '>'-separated title into multiple
+            heading lines (FR-28 AC1/AC2, ADR-615). Default False.
+
+    Returns:
+        A `_RenderedSlide` with heading_lines, body_parts,
+        title_is_fallback, and the source slide (read-only).
+    """
     slide_num = slide.index + 1
 
     # FR-20: Heading — use slide.title first; fall back to first is_title shape;
@@ -263,8 +441,10 @@ def _render_slide(
     # NOTE: title shape search uses original IR order (heading search is not
     #       position-dependent; we want the designated title placeholder).
     title_shape_used: TextShapeIR | None = None
+    heading_lines: list[str] = []
+    title_is_fallback = False
     if slide.title:
-        parts.append(f"{_SLIDE_HEADING_PREFIX} {slide.title}")
+        heading_lines = render_heading_lines(slide.title, hierarchy=heading_hierarchy)
         # AC1: find a matching is_title shape to suppress from body rendering
         for shape in slide.shapes:
             if (
@@ -281,12 +461,17 @@ def _render_slide(
             if isinstance(shape, TextShapeIR) and shape.is_title and shape.paragraphs:
                 heading_text = shape.paragraphs[0].text.strip()
                 if heading_text:
-                    parts.append(f"{_SLIDE_HEADING_PREFIX} {heading_text}")
+                    heading_lines = render_heading_lines(
+                        heading_text, hierarchy=heading_hierarchy
+                    )
                     title_shape_used = shape
                     break
         if title_shape_used is None:
-            # Fallback: no title available
-            parts.append(f"{_SLIDE_HEADING_PREFIX} Slide {slide_num}")
+            # Fallback: no title available. Not passed through
+            # render_heading_lines (ARCH-Wave3 §3.1: position fallback is
+            # excluded from '>' decomposition — it never contains one).
+            heading_lines = [f"{_SLIDE_HEADING_PREFIX} Slide {slide_num}"]
+            title_is_fallback = True
 
     # FR-22: image counter (mutable list used as a reference for group recursion)
     img_counter: list[int] = [0]
@@ -296,6 +481,7 @@ def _render_slide(
     # IR is read-only — we create a new list, never mutate slide.shapes (ADR-218).
     ordered_shapes: list[ShapeIR] = sorted(slide.shapes, key=_reading_order_key)
 
+    body_parts: list[str] = []
     for shape in ordered_shapes:
         # FR-20 / AC1: skip the shape already used as heading
         if shape is title_shape_used:
@@ -303,17 +489,22 @@ def _render_slide(
         # FR-21: skip footer/slide-number/date placeholders
         if isinstance(shape, TextShapeIR) and shape.is_footer:
             continue
-        rendered = _render_shape(
+        rendered_shape = _render_shape(
             shape,
             masking,
             slide_num=slide_num,
             img_counter=img_counter,
             table_fallback=table_fallback,
         )
-        if rendered:
-            parts.append(rendered)
+        if rendered_shape:
+            body_parts.append(rendered_shape)
 
-    return "\n\n".join(parts)
+    return _RenderedSlide(
+        heading_lines=heading_lines,
+        body_parts=body_parts,
+        title_is_fallback=title_is_fallback,
+        slide=slide,
+    )
 
 
 def _render_shape(
