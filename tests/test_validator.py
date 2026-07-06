@@ -532,3 +532,74 @@ class TestFr29Ac7NormalDocumentNoNewWarnings:
         result = validate_markdown(md)
         assert not any("빈 슬라이드" in w for w in result.warnings)
         assert not any("표" in w for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# QA 독립 보강 테스트 (issue #80 검증, tester 작성)
+# developer 스위트가 다루지 않은 경계/부작용 케이스를 독립적으로 확인한다.
+# ---------------------------------------------------------------------------
+
+
+class TestFr29QaSupplementIndependent:
+    def test_ac6_first_slide_block_empty_before_any_separator(self) -> None:
+        """AC6(QA): 첫 구분자 이전 슬라이드 블록이 비어도 빈 슬라이드 경고."""
+        md = "## Slide 1\n\n---\n\n## Slide 2\n\nBody 2."
+        result = validate_markdown(md)
+        assert result.valid is True
+        assert sum("빈 슬라이드" in w for w in result.warnings) == 1
+
+    def test_ac6_slide_with_only_fenced_code_is_not_empty(self) -> None:
+        """AC6(QA): 헤딩 뒤 펜스 코드블록만 있어도 본문으로 간주되어 경고 없음."""
+        md = (
+            "## Slide 1\n\nBody.\n\n---\n\n"
+            "## Slide 2\n\n```\ncode content\n```\n\n---\n\n"
+            "## Slide 3\n\nMore."
+        )
+        result = validate_markdown(md)
+        assert not any("빈 슬라이드" in w for w in result.warnings)
+
+    def test_ac1_escaped_pipe_in_header_no_false_column_mismatch(self) -> None:
+        """AC1/AC2(QA): 헤더 셀 내부 이스케이프 파이프(\\|)가 열 수 계산을 깨지 않음."""
+        md = "## T\n\n| A\\|B | C |\n| --- | --- |\n| 1 | 2 |\n\nText."
+        result = validate_markdown(md)
+        assert not any("표" in w for w in result.warnings)
+
+    def test_ac2_multiple_mismatched_rows_single_warning(self) -> None:
+        """AC2(QA): 열 수 불일치 데이터 행이 여러 개여도 표당 경고는 1건."""
+        md = "## T\n\n| A | B |\n| --- | --- |\n| 1 |\n| 1 | 2 | 3 |\n\nText."
+        result = validate_markdown(md)
+        assert sum("열 수 불일치" in w for w in result.warnings) == 1
+
+    def test_frontmatter_without_closing_marker_no_crash_no_false_positive(
+        self,
+    ) -> None:
+        """(QA): frontmatter 닫는 구분자 없어도 무예외·오탐 없음."""
+        md = "---\ngenerator: pptx-md\n\n## Slide 1\n\nBody 1."
+        result = validate_markdown(md)
+        assert isinstance(result, ValidationResult)
+
+    def test_ac3_three_consecutive_duplicate_headings_two_warnings(self) -> None:
+        """AC3(QA): 동일 텍스트 헤딩 3연속 → 인접 쌍마다 경고(2건), 회귀 가드."""
+        md = "## Same\n\n## Same\n\n## Same\n\nBody."
+        result = validate_markdown(md)
+        assert sum("중복 인접 헤딩" in w for w in result.warnings) == 2
+
+    def test_ac3_duplicate_broken_by_html_comment_no_warning(self) -> None:
+        """AC3(QA): 동일 헤딩 사이 HTML 주석 개입 시 인접 아님(경고 없음)."""
+        md = (
+            "## Same\n\nBody 1.\n\n---\n\n"
+            "<!-- slide_index: 2 | section: Same | has_diagram: false -->\n"
+            "## Same\n\nBody 2."
+        )
+        result = validate_markdown(md)
+        assert not any("중복 인접 헤딩" in w for w in result.warnings)
+
+    def test_ac7_valid_unchanged_when_new_rules_coexist_with_unclosed_fence(
+        self,
+    ) -> None:
+        """AC7(QA): 기존 미닫힘 펜스(valid=False)와 신규 규칙이 공존해도
+        valid 는 기존 규칙에만 좌우되고 신규 규칙은 여전히 경고만 추가."""
+        md = "## Slide 1\n\n```\nunclosed"
+        result = validate_markdown(md)
+        assert result.valid is False
+        assert sum("닫히지 않은" in w for w in result.warnings) == 1
