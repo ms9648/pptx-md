@@ -6,7 +6,9 @@ Covers AC1–AC8 of issue #33.  All tests use synthetic IR fixtures
 
 from __future__ import annotations
 
-from pptx_md.assembler import assemble_slide
+import re
+
+from pptx_md.assembler import assemble_document, assemble_slide
 from pptx_md.ir import (
     GroupShapeIR,
     ImageClass,
@@ -747,3 +749,291 @@ class TestFR23ReadingOrder:
         slide = SlideIR(index=0, title="T", shapes=[lower_left, upper_right])
         md = assemble_slide(slide)
         assert md.index("위행오른쪽") < md.index("아래행왼쪽")
+
+
+# ---------------------------------------------------------------------------
+# FR-28 (#77, W-A): heading_hierarchy / emit_toc / 옵션 배선 / seam 격리
+# AC name format: ac<N>_<short_description> (issue #77 numbering)
+# ---------------------------------------------------------------------------
+
+
+class TestAc1HeadingHierarchyDecomposition:
+    """AC1: heading_hierarchy=True & '>' 경로 → ##/###/####… 분해"""
+
+    def test_ac1_two_segment_title_h2_h3(self) -> None:
+        """ac1_2세그먼트_h2_h3: 최상위 ##, 후속 ### 로 분해되어 별도 헤딩이 된다."""
+        slide = SlideIR(
+            index=0,
+            title="Ⅱ. 사업의 이해 > ⑦ 현황·문제점",
+            shapes=[_text_shape([_para("본문")])],
+        )
+        pres = PresentationIR(source_path="t.pptx", slides=[slide])
+        doc = assemble_document(pres, heading_hierarchy=True)
+        lines = doc.splitlines()
+        assert lines[0] == "## Ⅱ. 사업의 이해"
+        assert lines[2] == "### ⑦ 현황·문제점"
+
+    def test_ac1_segments_trimmed(self) -> None:
+        """ac1_세그먼트_trim: 각 세그먼트 앞뒤 공백이 제거된다."""
+        slide = SlideIR(
+            index=0, title="  A  >  B  ", shapes=[_text_shape([_para("본문")])]
+        )
+        pres = PresentationIR(source_path="t.pptx", slides=[slide])
+        doc = assemble_document(pres, heading_hierarchy=True)
+        assert "## A" in doc.splitlines()
+        assert "### B" in doc.splitlines()
+
+    def test_ac1_deep_path_h4(self) -> None:
+        """ac1_3세그먼트_h4: 세 번째 세그먼트는 #### 로 렌더된다."""
+        slide = SlideIR(
+            index=0,
+            title="A > B > C",
+            shapes=[_text_shape([_para("본문")])],
+        )
+        pres = PresentationIR(source_path="t.pptx", slides=[slide])
+        doc = assemble_document(pres, heading_hierarchy=True)
+        assert "#### C" in doc.splitlines()
+
+    def test_ac1_is_title_shape_path_also_decomposed(self) -> None:
+        """ac1_is_title_도형도_분해: slide.title 부재시 is_title 도형 텍스트도 분해."""
+        title_s = _title_shape("섹션 > 하위섹션")
+        body_s = _text_shape([_para("본문")], shape_id=11)
+        slide = SlideIR(index=0, title="", shapes=[title_s, body_s])
+        pres = PresentationIR(source_path="t.pptx", slides=[slide])
+        doc = assemble_document(pres, heading_hierarchy=True)
+        lines = doc.splitlines()
+        assert lines[0] == "## 섹션"
+        assert lines[2] == "### 하위섹션"
+
+
+class TestAc2NoSeparatorSingleHeading:
+    """AC2: 구분자 없는 제목 → 단일 ##(현행 동일, 분해 미발동)"""
+
+    def test_ac2_plain_title_single_h2(self) -> None:
+        """ac2_구분자없음_단일헤딩: heading_hierarchy=True 라도 '>' 없으면 단일 ##."""
+        slide = SlideIR(
+            index=0, title="단순 제목", shapes=[_text_shape([_para("본문")])]
+        )
+        pres = PresentationIR(source_path="t.pptx", slides=[slide])
+        doc = assemble_document(pres, heading_hierarchy=True)
+        assert doc.startswith("## 단순 제목")
+        assert "###" not in doc.splitlines()[0]
+        # 헤딩 라인은 정확히 1줄이어야 한다 (분해 미발동)
+        heading_lines = [line for line in doc.splitlines() if line.startswith("#")]
+        assert heading_lines == ["## 단순 제목"]
+
+
+class TestAc3HeadingHierarchyOffByteIdentical:
+    """AC3: heading_hierarchy=False(기본) → 출력 바이트 동일(회귀 diff 0)"""
+
+    def test_ac3_off_matches_legacy_output_with_path_title(self) -> None:
+        """ac3_off_바이트동일: '>' 포함 제목도 off 시 레거시와 동일 문자열."""
+        slide = SlideIR(
+            index=0,
+            title="Ⅱ. 사업의 이해 > ⑦ 현황·문제점",
+            shapes=[_text_shape([_para("본문")])],
+        )
+        pres = PresentationIR(source_path="t.pptx", slides=[slide])
+        doc_off = assemble_document(pres)  # default heading_hierarchy=False
+        doc_off_explicit = assemble_document(pres, heading_hierarchy=False)
+        # 레거시 동작: '>' 는 분해되지 않고 원본 title 그대로 단일 heading
+        assert doc_off == doc_off_explicit
+        assert doc_off.startswith("## Ⅱ. 사업의 이해 > ⑦ 현황·문제점")
+
+    def test_ac3_off_default_matches_pre_wave3_single_slide_document(self) -> None:
+        """ac3_기본값_레거시_동일: 4옵션 모두 미지정 시 기존 M2~M5 산출물과 동일."""
+        slides = [
+            SlideIR(index=0, title="첫 슬라이드", shapes=[_text_shape([_para("A")])]),
+            SlideIR(index=1, title="", shapes=[_text_shape([_para("B")])]),
+        ]
+        pres = PresentationIR(source_path="t.pptx", slides=slides)
+        doc = assemble_document(pres)
+        expected_slide0 = assemble_slide(slides[0])
+        expected_slide1 = assemble_slide(slides[1])
+        assert doc == f"{expected_slide0}\n\n---\n\n{expected_slide1}"
+
+    def test_ac3_all_four_options_off_equals_no_kwargs(self) -> None:
+        """ac3_4옵션명시적off_동일: 4옵션 모두 명시적 False가 미지정과 바이트 동일."""
+        slide = SlideIR(
+            index=0, title="제목 > 하위", shapes=[_text_shape([_para("본문")])]
+        )
+        pres = PresentationIR(source_path="t.pptx", slides=[slide])
+        default_doc = assemble_document(pres)
+        explicit_doc = assemble_document(
+            pres,
+            heading_hierarchy=False,
+            emit_toc=False,
+            emit_frontmatter=False,
+            include_notes=False,
+        )
+        assert default_doc == explicit_doc
+
+
+class TestAc4EmitTocEmptySlideConversion:
+    """AC4: emit_toc=True & 본문 비공백 0 슬라이드 → TOC 항목/드롭, 빈 Slide N 0개"""
+
+    def test_ac4_real_title_empty_body_kept_as_heading_only(self) -> None:
+        """ac4_실제제목_빈본문: 실제 제목의 섹션 표지는 헤딩만 남는다."""
+        slide = SlideIR(index=0, title="Ⅱ. 사업의 이해", shapes=[])
+        pres = PresentationIR(source_path="t.pptx", slides=[slide])
+        doc = assemble_document(pres, emit_toc=True)
+        assert doc == "## Ⅱ. 사업의 이해"
+
+    def test_ac4_fallback_title_empty_body_dropped(self) -> None:
+        """ac4_fallback_빈본문_드롭: fallback '## Slide N' 은 블록이 사라진다."""
+        real_slide = SlideIR(
+            index=0, title="표지", shapes=[_text_shape([_para("내용")])]
+        )
+        empty_fallback_slide = SlideIR(index=1, title="", shapes=[])
+        slide3 = SlideIR(index=2, title="결론", shapes=[_text_shape([_para("끝")])])
+        pres = PresentationIR(
+            source_path="t.pptx", slides=[real_slide, empty_fallback_slide, slide3]
+        )
+        doc = assemble_document(pres, emit_toc=True)
+        assert "Slide 2" not in doc
+        assert "## Slide" not in doc  # 빈 'Slide N' 블록 0개 (AC4)
+
+    def test_ac4_no_empty_slide_n_headings_across_document(self) -> None:
+        """ac4_빈슬라이드N_0개: 여러 fallback-빈 슬라이드가 있어도 전부 드롭된다."""
+        slides = [
+            SlideIR(index=0, title="", shapes=[]),
+            SlideIR(index=1, title="", shapes=[]),
+            SlideIR(
+                index=2, title="유일한 내용", shapes=[_text_shape([_para("본문")])]
+            ),
+        ]
+        pres = PresentationIR(source_path="t.pptx", slides=slides)
+        doc = assemble_document(pres, emit_toc=True)
+        assert "Slide 1" not in doc
+        assert "Slide 2" not in doc
+        assert doc == "## 유일한 내용\n\n본문"
+
+    def test_ac4_non_empty_body_untouched_by_emit_toc(self) -> None:
+        """ac4_비공백본문_무변환: 본문이 있으면 emit_toc 와 무관하게 그대로 렌더."""
+        slide = SlideIR(
+            index=0, title="본문 있는 슬라이드", shapes=[_text_shape([_para("내용")])]
+        )
+        pres = PresentationIR(source_path="t.pptx", slides=[slide])
+        doc_off = assemble_document(pres)
+        doc_on = assemble_document(pres, emit_toc=True)
+        assert doc_off == doc_on
+
+    def test_ac4_emit_toc_false_preserves_legacy_empty_slide_n(self) -> None:
+        """ac4_emit_toc_off: emit_toc=False 면 빈 'Slide N' 이 그대로 남는다."""
+        slide = SlideIR(index=0, title="", shapes=[])
+        pres = PresentationIR(source_path="t.pptx", slides=[slide])
+        doc = assemble_document(pres)  # emit_toc=False (default)
+        assert doc == "## Slide 1"
+
+
+class TestAc5OptionsBackwardCompatible:
+    """AC5: ConvertOptions()·convert(src) 무손상 (assemble_document 레벨 대리 검증)"""
+
+    def test_ac5_assemble_document_no_kwargs_still_works(self) -> None:
+        """ac5_키워드인자없이_호출: 신규 4옵션 없이도 assemble_document 가 동작한다."""
+        slide = SlideIR(index=0, title="T", shapes=[_text_shape([_para("본문")])])
+        pres = PresentationIR(source_path="t.pptx", slides=[slide])
+        doc = assemble_document(pres, masking=None, suppress_repeated_labels=False)
+        assert doc.startswith("## T")
+
+    def test_ac5_assemble_slide_signature_unchanged(self) -> None:
+        """ac5_시그니처_불변: assemble_slide 는 신규 옵션을 받지 않는다."""
+        slide = SlideIR(index=0, title="T", shapes=[])
+        # assemble_slide는 masking/table_fallback 만 받는다 (heading_hierarchy 없음)
+        result = assemble_slide(slide, masking=None, table_fallback="mermaid")
+        assert result == "## T"
+
+
+class TestAc6NewModulesNoForbiddenImports:
+    """AC6: 신규 모듈(heading.py/metadata.py/notes.py) SDK·pptx·Pillow import 0
+
+    NOTE: matches actual ``import pptx`` / ``from pptx ...`` statements via
+    regex (word boundary after "pptx") rather than a naive substring check,
+    so that docstring mentions of "python-pptx" and internal
+    ``from pptx_md...`` imports are not false positives.
+    """
+
+    _FORBIDDEN_PPTX_IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+pptx\b")
+
+    def _assert_no_forbidden_imports(self, source: str) -> None:
+        assert "anthropic" not in source
+        assert "openai" not in source
+        assert "PIL" not in source
+        for line in source.splitlines():
+            assert not self._FORBIDDEN_PPTX_IMPORT_RE.match(line), line
+
+    def test_ac6_heading_module_stdlib_only(self) -> None:
+        """ac6_heading_모듈_격리: heading.py 는 SDK/pptx/Pillow 를 import하지 않는다."""
+        import pathlib
+
+        source = (
+            pathlib.Path(__file__).parent.parent / "src" / "pptx_md" / "heading.py"
+        ).read_text(encoding="utf-8")
+        self._assert_no_forbidden_imports(source)
+
+    def test_ac6_metadata_module_no_sdk_imports(self) -> None:
+        """ac6_metadata_모듈_격리: metadata.py 는 SDK/Pillow 를 import하지 않는다."""
+        import pathlib
+
+        source = (
+            pathlib.Path(__file__).parent.parent / "src" / "pptx_md" / "metadata.py"
+        ).read_text(encoding="utf-8")
+        self._assert_no_forbidden_imports(source)
+
+    def test_ac6_notes_module_no_sdk_imports(self) -> None:
+        """ac6_notes_모듈_격리: notes.py 는 SDK/pptx/Pillow 를 import하지 않는다."""
+        import pathlib
+
+        source = (
+            pathlib.Path(__file__).parent.parent / "src" / "pptx_md" / "notes.py"
+        ).read_text(encoding="utf-8")
+        self._assert_no_forbidden_imports(source)
+
+
+class TestAc7QualityGates:
+    """AC7: ruff/black/mypy exit 0 (실제 하위프로세스 실행으로 검증)"""
+
+    def test_ac7_mypy_strict_exit0(self) -> None:
+        """ac7_mypy_exit0: mypy src/ 는 exit 0 이어야 한다."""
+        import pathlib
+        import subprocess
+        import sys
+
+        project_root = pathlib.Path(__file__).parent.parent
+        result = subprocess.run(
+            [sys.executable, "-m", "mypy", "src/"],
+            capture_output=True,
+            text=True,
+            cwd=str(project_root),
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_ac7_ruff_check_exit0(self) -> None:
+        """ac7_ruff_exit0: ruff check . 는 exit 0 이어야 한다."""
+        import pathlib
+        import subprocess
+        import sys
+
+        project_root = pathlib.Path(__file__).parent.parent
+        result = subprocess.run(
+            [sys.executable, "-m", "ruff", "check", "."],
+            capture_output=True,
+            text=True,
+            cwd=str(project_root),
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_ac7_black_check_exit0(self) -> None:
+        """ac7_black_exit0: black --check . 는 exit 0 이어야 한다."""
+        import pathlib
+        import subprocess
+        import sys
+
+        project_root = pathlib.Path(__file__).parent.parent
+        result = subprocess.run(
+            [sys.executable, "-m", "black", "--check", "."],
+            capture_output=True,
+            text=True,
+            cwd=str(project_root),
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
