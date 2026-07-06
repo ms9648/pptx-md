@@ -161,7 +161,7 @@ class TestAc1ConvertReturnsStr:
         def fake_enrich_descriptions(pres: Any, describer: Any, **kwargs: Any) -> None:
             call_log.append("enrich_descriptions")
 
-        def fake_assemble(pres: Any, *, masking: Any = None) -> str:
+        def fake_assemble(pres: Any, *, masking: Any = None, **kwargs: Any) -> str:
             call_log.append("assemble")
             return "# Test Slide\n"
 
@@ -435,7 +435,7 @@ class TestAc5MaskingEmail:
         def fake_enrich_descriptions(pres: Any, describer: Any, **kwargs: Any) -> None:
             pass
 
-        def fake_assemble(pres: Any, *, masking: Any = None) -> str:
+        def fake_assemble(pres: Any, *, masking: Any = None, **kwargs: Any) -> str:
             captured_masking.append(masking)
             return "# Slide\n"
 
@@ -510,7 +510,7 @@ class TestAc7EmptyPptxNoException:
         def fake_enrich_descriptions(pres: Any, describer: Any, **kwargs: Any) -> None:
             pass
 
-        def fake_assemble(pres: Any, *, masking: Any = None) -> str:
+        def fake_assemble(pres: Any, *, masking: Any = None, **kwargs: Any) -> str:
             return ""
 
         with (
@@ -569,7 +569,7 @@ class TestAc9ValidateLogging:
         def fake_enrich_descriptions(pres: Any, describer: Any, **kwargs: Any) -> None:
             pass
 
-        def fake_assemble(pres: Any, *, masking: Any = None) -> str:
+        def fake_assemble(pres: Any, *, masking: Any = None, **kwargs: Any) -> str:
             return "# Slide\n\nContent\n"
 
         def fake_validate(md: str) -> Any:
@@ -609,7 +609,7 @@ class TestAc9ValidateLogging:
         def fake_enrich_descriptions(pres: Any, describer: Any, **kwargs: Any) -> None:
             pass
 
-        def fake_assemble(pres: Any, *, masking: Any = None) -> str:
+        def fake_assemble(pres: Any, *, masking: Any = None, **kwargs: Any) -> str:
             return "# Slide\n"
 
         def fake_validate(md: str) -> Any:
@@ -649,7 +649,7 @@ class TestAc9ValidateLogging:
         def fake_enrich_descriptions(pres: Any, describer: Any, **kwargs: Any) -> None:
             pass
 
-        def fake_assemble(pres: Any, *, masking: Any = None) -> str:
+        def fake_assemble(pres: Any, *, masking: Any = None, **kwargs: Any) -> str:
             return "# Slide\n\n```\nunclosed fence"
 
         def fake_validate(md: str) -> Any:
@@ -691,7 +691,7 @@ class TestAc9ValidateLogging:
         def fake_enrich_descriptions(pres: Any, describer: Any, **kwargs: Any) -> None:
             pass
 
-        def fake_assemble(pres: Any, *, masking: Any = None) -> str:
+        def fake_assemble(pres: Any, *, masking: Any = None, **kwargs: Any) -> str:
             return "# Slide\n"
 
         def fake_validate(md: str) -> Any:

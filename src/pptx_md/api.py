@@ -68,6 +68,20 @@ class ConvertOptions:
                    rendered as a fenced flowchart block when structured
                    (FR-27 AC4/AC5, ADR-611/613). Default False preserves
                    the pre-M12 plain-text description behaviour.
+        heading_hierarchy: When True, decompose a '>'-separated slide
+                   title into a "##"/"###"/"####"... heading chain
+                   (FR-28 AC1/AC2, ADR-614/615). Default False preserves
+                   the single "## {title}" heading (byte-identical, AC3).
+        emit_toc:  When True, slides whose rendered body is empty besides
+                   the heading are converted to a heading-only TOC block
+                   or dropped entirely (FR-28 AC4, ADR-614/616). Default
+                   False preserves existing behaviour.
+        emit_frontmatter: When True, attaches document-level YAML
+                   frontmatter and per-slide HTML-comment metadata
+                   (FR-28 AC5-AC7, ADR-614/617). Default False.
+        include_notes: When True, attaches a "> notes" blockquote per
+                   slide from SlideIR.notes (FR-28 AC8/AC9, ADR-614/618).
+                   Default False.
     """
 
     describer: ImageDescriber | None = None
@@ -75,6 +89,10 @@ class ConvertOptions:
     validate: bool = False
     describe_max_workers: int = 4
     diagram_mermaid: bool = False
+    heading_hierarchy: bool = False
+    emit_toc: bool = False
+    emit_frontmatter: bool = False
+    include_notes: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -125,8 +143,15 @@ def convert(
         diagram_mermaid=opts.diagram_mermaid,
     )
 
-    # --- Stage 4: assemble Markdown (masking opt-in) ---
-    md = assemble_document(pres, masking=opts.masking)
+    # --- Stage 4: assemble Markdown (masking + FR-28 structured opt-in) ---
+    md = assemble_document(
+        pres,
+        masking=opts.masking,
+        heading_hierarchy=opts.heading_hierarchy,
+        emit_toc=opts.emit_toc,
+        emit_frontmatter=opts.emit_frontmatter,
+        include_notes=opts.include_notes,
+    )
 
     # --- Stage 5: validate (opt-in, logging-only — ADR-604) ---
     if opts.validate:
