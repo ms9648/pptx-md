@@ -1,35 +1,49 @@
-"""Speaker-notes rendering contract — MINIMAL STUB (FR-28 AC8-AC9, issue #77).
+"""Speaker-notes blockquote rendering (FR-28 AC8-AC9, issue #79, W-C).
 
-Ownership (ARCH-Wave3 §2.1/ADR-621, WBS issue C / #79):
-    This module is created by issue #77 (W-A) *only* to lock the public
-    contract signature that `assembler.py` seams call, so that #79 (W-C)
-    can implement the body without touching `assembler.py`.  The function
-    body below is intentionally a no-op stub (always returns "") — do NOT
-    fill in the real '> notes' rendering here as part of #77; that is
-    #79's scope (ARCH-Wave3 §3.6).
-
-    A no-op stub guarantees zero side effects even when
-    `include_notes=True` before #79 lands: `assemble_document` only
-    appends the seam's output when it is non-empty (AC9 semantics).
-
-Public interface (contract, ADR-618):
+Public interface:
     render_notes_block(notes: str) -> str
 
-INV-5: stdlib-only. No VLM SDK / python-pptx / Pillow / internal imports needed.
+Design constraints (ARCH-Wave3 §3.6, ADR-618):
+    - Pure function: no mutation, no I/O, deterministic (INV-1).
+    - stdlib only — no VLM SDK / python-pptx / Pillow imports (INV-5).
+    - Empty/whitespace-only notes render to "" (no blockquote emitted,
+      AC2/AC9) so that `include_notes=True` with the default
+      `SlideIR.notes == ""` stays byte-identical to the pre-Wave-3
+      assembler output.
+    - `\\v` (U+000B) is normalized to `\\n` before splitting into lines,
+      matching the FR-24 control-character normalization convention
+      already applied elsewhere in the assembler (AC3).
 """
 
 from __future__ import annotations
 
 __all__ = ["render_notes_block"]
 
+_NOTES_HEADER: str = "> notes"
+
 
 def render_notes_block(notes: str) -> str:
-    """STUB — contract only. Real implementation owned by issue #79.
+    """Render *notes* as a '> notes' blockquote (FR-28 AC8-AC9).
+
+    Behaviour:
+        - ``notes`` empty or whitespace-only: returns ``""`` — no
+          blockquote is emitted (AC2/AC9). The caller (assembler seam)
+          only appends this result as a slide block part when it is
+          non-empty, so the off/empty path stays byte-identical.
+        - Otherwise: ``\\v`` is normalized to ``\\n`` (FR-24 parity,
+          AC3), the text is split into lines, and each line — including
+          the fixed ``"> notes"`` header — is emitted with a ``"> "``
+          prefix (AC1/AC8).
 
     Args:
-        notes: Raw SlideIR.notes text.
+        notes: Raw ``SlideIR.notes`` text.
 
     Returns:
-        "" (no-op) until #79 implements the '> notes' blockquote rendering.
+        The rendered '> notes' blockquote, or ``""`` when *notes* is
+        empty/whitespace-only.
     """
-    return ""
+    if not notes.strip():
+        return ""
+    normalized = notes.replace("\v", "\n")
+    lines = [_NOTES_HEADER] + [f"> {line}" for line in normalized.split("\n")]
+    return "\n".join(lines)
