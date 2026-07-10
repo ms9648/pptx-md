@@ -310,3 +310,296 @@ class TestAc8NoDependency:
             assert (
                 forbidden_import not in source
             ), f"외부 Markdown 파서 의존 발견: {forbidden_import}"
+
+
+# ---------------------------------------------------------------------------
+# FR-29 (issue #80): validator 신규 4규칙 — ARCH-Wave3 §3.7, ADR-619
+#
+# AC1 — 데이터 행 0인 pipe table → 깨진 표 경고 1건 (펜스 내 `|` 미오탐)
+# AC2 — 헤더와 열 수 불일치 데이터 행 → 열 수 불일치 경고 1건
+# AC3 — 인접 동일 텍스트 헤딩 2줄 → 중복 인접 헤딩 경고 1건
+# AC4 — `\v` 잔존 → 잔존 개수 포함 경고 1건
+# AC5 — 전공백 pipe table → 전공백 표 경고 1건
+# AC6 — 본문 없는 슬라이드 블록(D-4) → 빈 슬라이드 경고 1건
+# AC7 — 정상 문서 → 신규 경고 0, FR-14 회귀 0, 무예외, valid 불변
+# AC8 — ruff/black/mypy/pytest 게이트 (별도 커맨드 실행으로 증명, 본 파일은 통과로 기여)
+# ---------------------------------------------------------------------------
+
+
+class TestFr29Ac1BrokenPipeTable:
+    def test_ac1_header_and_separator_only_warns_no_data(self) -> None:
+        """AC1: 헤더+구분행만 있고 데이터 행 0 → 깨진 표 경고 1건."""
+        md = "## Title\n\n| A | B |\n| --- | --- |\n\nText."
+        result = validate_markdown(md)
+        assert result.valid is True
+        assert sum("깨진 표" in w for w in result.warnings) == 1
+
+    def test_ac1_fenced_pipe_lines_not_misdetected(self) -> None:
+        """AC1: 코드펜스 내부 `|` 라인은 표로 오인하지 않음(경고 0)."""
+        md = "## Title\n\n```\n| A | B |\n| --- | --- |\n```\n\nText."
+        result = validate_markdown(md)
+        assert not any("표" in w for w in result.warnings)
+
+    def test_ac1_normal_table_with_data_no_warning(self) -> None:
+        """AC1(대조): 데이터 행이 있는 정상 표 → 깨진 표 경고 없음."""
+        md = "## Title\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\nText."
+        result = validate_markdown(md)
+        assert not any("깨진 표" in w for w in result.warnings)
+
+    def test_ac1_second_line_not_a_valid_separator_is_not_a_table(self) -> None:
+        """AC1(대조): 2번째 행이 구분행이 아니면 표로 확정하지 않음(경고 없음)."""
+        md = "## Title\n\n| A |\n|\n\nText."
+        result = validate_markdown(md)
+        assert not any("표" in w for w in result.warnings)
+
+
+class TestFr29Ac2ColumnMismatch:
+    def test_ac2_data_row_fewer_columns_warns(self) -> None:
+        """AC2: 데이터 행의 열 수가 헤더보다 적음 → 열 수 불일치 경고 1건."""
+        md = "## Title\n\n| A | B | C |\n| --- | --- | --- |\n| 1 | 2 |\n\nText."
+        result = validate_markdown(md)
+        assert result.valid is True
+        assert sum("열 수 불일치" in w for w in result.warnings) == 1
+
+    def test_ac2_data_row_more_columns_warns(self) -> None:
+        """AC2: 데이터 행의 열 수가 헤더보다 많음 → 열 수 불일치 경고 1건."""
+        md = "## Title\n\n| A | B |\n| --- | --- |\n| 1 | 2 | 3 |\n\nText."
+        result = validate_markdown(md)
+        assert sum("열 수 불일치" in w for w in result.warnings) == 1
+
+    def test_ac2_matching_columns_no_warning(self) -> None:
+        """AC2(대조): 열 수가 일치하면 경고 없음."""
+        md = "## Title\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\nText."
+        result = validate_markdown(md)
+        assert not any("열 수 불일치" in w for w in result.warnings)
+
+
+class TestFr29Ac3DuplicateAdjacentHeadings:
+    def test_ac3_adjacent_identical_headings_warns(self) -> None:
+        """AC3: 인접(사이 본문 없음) 동일 텍스트 헤딩 2줄 → 중복 인접 헤딩 경고 1건."""
+        md = "## Same\n\n## Same\n\nContent."
+        result = validate_markdown(md)
+        assert result.valid is True
+        assert sum("중복 인접 헤딩" in w for w in result.warnings) == 1
+
+    def test_ac3_headings_separated_by_body_no_warning(self) -> None:
+        """AC3(대조): 사이에 본문이 있으면 인접 아님 → 경고 없음."""
+        md = "## Same\n\nSome content.\n\n## Same\n\nMore."
+        result = validate_markdown(md)
+        assert not any("중복 인접 헤딩" in w for w in result.warnings)
+
+    def test_ac3_headings_separated_by_slide_separator_no_warning(self) -> None:
+        """AC3(대조): `---` 슬라이드 구분자가 개입하면 인접 아님 → 경고 없음."""
+        md = "## Same\n\nBody 1.\n\n---\n\n## Same\n\nBody 2."
+        result = validate_markdown(md)
+        assert not any("중복 인접 헤딩" in w for w in result.warnings)
+
+    def test_ac3_different_text_headings_no_warning(self) -> None:
+        """AC3(대조): 텍스트가 다르면 인접해도 경고 없음."""
+        md = "## First\n\n## Second\n\nContent."
+        result = validate_markdown(md)
+        assert not any("중복 인접 헤딩" in w for w in result.warnings)
+
+
+class TestFr29Ac4ResidualVerticalTab:
+    def test_ac4_single_vertical_tab_warns_with_count(self) -> None:
+        """AC4: `\\v` 1개 잔존 → 잔존 개수(1개) 포함 경고 1건."""
+        md = "## Title\n\nLine one\vLine two."
+        result = validate_markdown(md)
+        assert result.valid is True
+        assert any("\\v" in w and "1개" in w for w in result.warnings)
+
+    def test_ac4_multiple_vertical_tabs_count_correct(self) -> None:
+        """AC4: `\\v` 3개 잔존 → 경고 메시지에 개수(3개) 포함."""
+        md = "## Title\n\nA\vB\vC\vD."
+        result = validate_markdown(md)
+        assert any("3개" in w for w in result.warnings)
+
+    def test_ac4_no_vertical_tab_no_warning(self) -> None:
+        """AC4(대조): `\\v` 없으면 경고 없음."""
+        md = "## Title\n\nNormal text."
+        result = validate_markdown(md)
+        assert not any("\\v" in w for w in result.warnings)
+
+
+class TestFr29Ac5AllBlankPipeTable:
+    def test_ac5_all_cells_blank_warns(self) -> None:
+        """AC5: 모든 셀이 공백인 pipe table → 전공백 표 경고 1건."""
+        md = "## Title\n\n| A | B |\n| --- | --- |\n|  |  |\n\nText."
+        result = validate_markdown(md)
+        assert result.valid is True
+        assert sum("전공백 표" in w for w in result.warnings) == 1
+
+    def test_ac5_partial_content_no_warning(self) -> None:
+        """AC5(대조): 일부 셀에 내용이 있으면 전공백 경고 없음."""
+        md = "## Title\n\n| A | B |\n| --- | --- |\n| 1 |  |\n\nText."
+        result = validate_markdown(md)
+        assert not any("전공백 표" in w for w in result.warnings)
+
+
+class TestFr29Ac6EmptySlideBlock:
+    def test_ac6_slide_block_with_only_heading_warns(self) -> None:
+        """AC6: 헤딩만 있고 본문 없는 슬라이드 블록 → 빈 슬라이드 경고 1건."""
+        md = (
+            "## Slide 1\n\nBody.\n\n---\n\n"
+            "## Slide 2\n\n---\n\n"
+            "## Slide 3\n\nMore body."
+        )
+        result = validate_markdown(md)
+        assert result.valid is True
+        assert sum("빈 슬라이드" in w for w in result.warnings) == 1
+
+    def test_ac6_slide_block_with_heading_and_comment_only_warns(self) -> None:
+        """AC6: 헤딩+HTML 주석만 있고 본문 없는 블록도 빈 슬라이드로 판정."""
+        md = (
+            "## Slide 1\n\nBody.\n\n---\n\n"
+            "<!-- slide_index: 2 | section: Slide 2 | has_diagram: false -->\n"
+            "## Slide 2\n\n---\n\n"
+            "## Slide 3\n\nMore body."
+        )
+        result = validate_markdown(md)
+        assert sum("빈 슬라이드" in w for w in result.warnings) == 1
+
+    def test_ac6_all_blocks_with_body_no_warning(self) -> None:
+        """AC6(대조): 모든 블록에 본문이 있으면 빈 슬라이드 경고 없음."""
+        md = "## Slide 1\n\nBody 1.\n\n---\n\n## Slide 2\n\nBody 2."
+        result = validate_markdown(md)
+        assert not any("빈 슬라이드" in w for w in result.warnings)
+
+    def test_ac6_zero_line_block_between_adjacent_separators_warns(self) -> None:
+        """AC6: 연속된 `---` 사이 완전 빈 블록(0줄)도 빈 슬라이드로 판정."""
+        md = "## Slide 1\n\nBody.\n\n---\n---\n\n## Slide 2\n\nBody 2."
+        result = validate_markdown(md)
+        assert sum("빈 슬라이드" in w for w in result.warnings) == 1
+
+    def test_ac6_frontmatter_leading_blank_lines_still_stripped(self) -> None:
+        """AC6: frontmatter 앞에 공백 줄이 있어도 정상 스킵되어 오탐 없음."""
+        md = (
+            "\n\n---\ngenerator: pptx-md\n---\n\n"
+            "## Slide 1\n\nBody 1.\n\n---\n\n## Slide 2\n\nBody 2."
+        )
+        result = validate_markdown(md)
+        assert not any("빈 슬라이드" in w for w in result.warnings)
+
+
+class TestFr29Ac7NormalDocumentNoNewWarnings:
+    def test_ac7_normal_document_zero_new_warnings(self) -> None:
+        """AC7: 결함 없는 정상 문서 → FR-29 신규 경고 0건, valid=True."""
+        md = (
+            "## 표지\n\n본문 텍스트입니다.\n\n"
+            "| A | B |\n| --- | --- |\n| 1 | 2 |\n\n"
+            "---\n\n"
+            "## Ⅱ. 사업의 이해\n\n본문 2.\n\n"
+            "---\n\n"
+            "## 결론\n\n마지막 본문."
+        )
+        result = validate_markdown(md)
+        assert result.valid is True
+        assert result.warnings == []
+
+    def test_ac7_existing_fr14_warnings_unaffected(self) -> None:
+        """AC7: FR-14 헤딩 시작/점프 경고는 회귀 없이 유지, 신규 경고와 안 섞임."""
+        md = "### Deep Start\n\nContent."
+        result = validate_markdown(md)
+        assert any("시작" in w for w in result.warnings)
+        new_rule_hits = [
+            w
+            for w in result.warnings
+            if "깨진 표" in w
+            or "열 수 불일치" in w
+            or "전공백 표" in w
+            or "중복 인접 헤딩" in w
+            or "\\v" in w
+            or "빈 슬라이드" in w
+        ]
+        assert new_rule_hits == []
+
+    def test_ac7_no_exception_on_malformed_pipe_content(self) -> None:
+        """AC7: 기형적인 pipe 콘텐츠에도 예외 없이 ValidationResult 반환."""
+        md = "## Title\n\n|||||\n|-|\n\nContent."
+        result = validate_markdown(md)
+        assert isinstance(result, ValidationResult)
+
+    def test_ac7_frontmatter_not_misdetected(self) -> None:
+        """AC7: frontmatter 블록은 표/빈 슬라이드 분석에서 제외되어 오탐 없음."""
+        md = (
+            "---\n"
+            "generator: pptx-md\n"
+            "slide_count: 2\n"
+            "---\n\n"
+            "## Slide 1\n\nBody 1.\n\n---\n\n## Slide 2\n\nBody 2."
+        )
+        result = validate_markdown(md)
+        assert not any("빈 슬라이드" in w for w in result.warnings)
+        assert not any("표" in w for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# QA 독립 보강 테스트 (issue #80 검증, tester 작성)
+# developer 스위트가 다루지 않은 경계/부작용 케이스를 독립적으로 확인한다.
+# ---------------------------------------------------------------------------
+
+
+class TestFr29QaSupplementIndependent:
+    def test_ac6_first_slide_block_empty_before_any_separator(self) -> None:
+        """AC6(QA): 첫 구분자 이전 슬라이드 블록이 비어도 빈 슬라이드 경고."""
+        md = "## Slide 1\n\n---\n\n## Slide 2\n\nBody 2."
+        result = validate_markdown(md)
+        assert result.valid is True
+        assert sum("빈 슬라이드" in w for w in result.warnings) == 1
+
+    def test_ac6_slide_with_only_fenced_code_is_not_empty(self) -> None:
+        """AC6(QA): 헤딩 뒤 펜스 코드블록만 있어도 본문으로 간주되어 경고 없음."""
+        md = (
+            "## Slide 1\n\nBody.\n\n---\n\n"
+            "## Slide 2\n\n```\ncode content\n```\n\n---\n\n"
+            "## Slide 3\n\nMore."
+        )
+        result = validate_markdown(md)
+        assert not any("빈 슬라이드" in w for w in result.warnings)
+
+    def test_ac1_escaped_pipe_in_header_no_false_column_mismatch(self) -> None:
+        """AC1/AC2(QA): 헤더 셀 내부 이스케이프 파이프(\\|)가 열 수 계산을 깨지 않음."""
+        md = "## T\n\n| A\\|B | C |\n| --- | --- |\n| 1 | 2 |\n\nText."
+        result = validate_markdown(md)
+        assert not any("표" in w for w in result.warnings)
+
+    def test_ac2_multiple_mismatched_rows_single_warning(self) -> None:
+        """AC2(QA): 열 수 불일치 데이터 행이 여러 개여도 표당 경고는 1건."""
+        md = "## T\n\n| A | B |\n| --- | --- |\n| 1 |\n| 1 | 2 | 3 |\n\nText."
+        result = validate_markdown(md)
+        assert sum("열 수 불일치" in w for w in result.warnings) == 1
+
+    def test_frontmatter_without_closing_marker_no_crash_no_false_positive(
+        self,
+    ) -> None:
+        """(QA): frontmatter 닫는 구분자 없어도 무예외·오탐 없음."""
+        md = "---\ngenerator: pptx-md\n\n## Slide 1\n\nBody 1."
+        result = validate_markdown(md)
+        assert isinstance(result, ValidationResult)
+
+    def test_ac3_three_consecutive_duplicate_headings_two_warnings(self) -> None:
+        """AC3(QA): 동일 텍스트 헤딩 3연속 → 인접 쌍마다 경고(2건), 회귀 가드."""
+        md = "## Same\n\n## Same\n\n## Same\n\nBody."
+        result = validate_markdown(md)
+        assert sum("중복 인접 헤딩" in w for w in result.warnings) == 2
+
+    def test_ac3_duplicate_broken_by_html_comment_no_warning(self) -> None:
+        """AC3(QA): 동일 헤딩 사이 HTML 주석 개입 시 인접 아님(경고 없음)."""
+        md = (
+            "## Same\n\nBody 1.\n\n---\n\n"
+            "<!-- slide_index: 2 | section: Same | has_diagram: false -->\n"
+            "## Same\n\nBody 2."
+        )
+        result = validate_markdown(md)
+        assert not any("중복 인접 헤딩" in w for w in result.warnings)
+
+    def test_ac7_valid_unchanged_when_new_rules_coexist_with_unclosed_fence(
+        self,
+    ) -> None:
+        """AC7(QA): 기존 미닫힘 펜스(valid=False)와 신규 규칙이 공존해도
+        valid 는 기존 규칙에만 좌우되고 신규 규칙은 여전히 경고만 추가."""
+        md = "## Slide 1\n\n```\nunclosed"
+        result = validate_markdown(md)
+        assert result.valid is False
+        assert sum("닫히지 않은" in w for w in result.warnings) == 1
