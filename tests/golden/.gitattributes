@@ -1,0 +1,6 @@
+# Golden fixtures (FR-29 AC8/AC9, issue #81, ADR-620) are compared
+# byte-for-byte against `assemble_document` output (LF-only, since Python
+# string joins in assembler.py always use "\n"). Force LF line endings on
+# checkout/commit regardless of the developer machine's `core.autocrlf`
+# setting so the AC9 byte-comparison gate never false-fails on Windows.
+*.md text eol=lf
