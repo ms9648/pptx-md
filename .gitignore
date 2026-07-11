@@ -17,6 +17,9 @@ build/
 venv/
 env/
 
+# Intake / customer source files (never commit — 사내·고객 원본 e.g. .upload/*.pptx, RFP)
+.upload/
+
 # Testing / coverage
 .coverage
 .coverage.*
