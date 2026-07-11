@@ -140,6 +140,12 @@ class SlideIR:
     title: str = ""  # "" when absent (ADR-202)
     notes: str = ""  # "" when absent (ADR-202)
     shapes: list[ShapeIR] = field(default_factory=list)
+    # FR-33 (ADR-627, INV-2): filled in-place by
+    # slide_reconstruction.reconstruct_slides() when the hybrid render+VLM
+    # path reconstructs this slide. None (default) means "no reconstruction
+    # performed / fell back to the text path" -- existing callers/tests that
+    # never touch this slot are unaffected (INV-2 backward compatibility).
+    reconstructed_md: str | None = None
 
 
 @dataclass

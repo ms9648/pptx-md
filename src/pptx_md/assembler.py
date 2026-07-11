@@ -50,6 +50,16 @@ all default False so existing behaviour/output is byte-identical, AC3):
       notes.py (owned by issues #78/#79).  Both modules are currently
       minimal no-op stubs, so these two options have no visible effect
       yet — the seam only attaches non-empty output (§3.3/§3.6).
+
+FR-33 hybrid orchestration slot consumption (ARCH-v020 §3.4, ADR-627,
+issue #95 — opt-in, off by default so existing behaviour/output is
+byte-identical, INV-3):
+    - When ``SlideIR.reconstructed_md`` is not None (filled in-place by
+      ``pptx_md.slide_reconstruction.reconstruct_slides``), that Markdown
+      fragment becomes the whole slide body (masking still applied) and the
+      shape-by-shape render below is skipped for that slide.
+    - ``reconstructed_md`` defaults to None (INV-2) -- untouched IR always
+      takes the existing shape-render path, so byte output is unchanged.
 """
 
 from __future__ import annotations
@@ -472,6 +482,22 @@ def _render_slide_structured(
             # excluded from '>' decomposition — it never contains one).
             heading_lines = [f"{_SLIDE_HEADING_PREFIX} Slide {slide_num}"]
             title_is_fallback = True
+
+    # FR-33 (ADR-627): a filled reconstructed_md slot short-circuits the
+    # shape-by-shape body render entirely -- the render+VLM path already
+    # produced the whole structured body for this slide (ARCH-v020 §3.4).
+    # None (default) falls through to the unchanged shape-render path below,
+    # so off-path conversions stay byte-identical (INV-3, FR-33 AC2).
+    if slide.reconstructed_md is not None:
+        text = slide.reconstructed_md
+        if masking is not None:
+            text = mask_text(text, masking)
+        return _RenderedSlide(
+            heading_lines=heading_lines,
+            body_parts=[text],
+            title_is_fallback=title_is_fallback,
+            slide=slide,
+        )
 
     # FR-22: image counter (mutable list used as a reference for group recursion)
     img_counter: list[int] = [0]

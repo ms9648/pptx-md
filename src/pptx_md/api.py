@@ -22,16 +22,20 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 # Internal pipeline imports — these are all stdlib+internal modules,
-# no VLM SDK is imported here (NFR-08, ADR-601).
+# no VLM SDK is imported here (NFR-08, ADR-601). slide_reconstruction.py
+# itself never imports a VLM SDK either (the reconstructor is injected) and
+# only lazily touches pypdfium2 inside slide_render.py (INV-5).
 from pptx_md.assembler import assemble_document
 from pptx_md.description_pipeline import enrich_descriptions
 from pptx_md.image_pipeline import enrich_images
 from pptx_md.parser import parse_presentation
+from pptx_md.slide_reconstruction import reconstruct_slides
 from pptx_md.validator import validate_markdown
 
 if TYPE_CHECKING:
     from pptx_md.describer import ImageDescriber
     from pptx_md.masking import MaskingOptions
+    from pptx_md.slide_describer import SlideReconstructor
 
 _logger = logging.getLogger("pptx_md.api")
 
@@ -82,6 +86,30 @@ class ConvertOptions:
         include_notes: When True, attaches a "> notes" blockquote per
                    slide from SlideIR.notes (FR-28 AC8/AC9, ADR-614/618).
                    Default False.
+        reconstructor: Slide-reconstruction VLM provider (SlideReconstructor
+                   Protocol, FR-32). None (default) = the hybrid render+VLM
+                   stage is skipped entirely regardless of
+                   visual_reconstruct (FR-33 AC3).
+        visual_reconstruct: Master opt-in switch for the hybrid render+VLM
+                   orchestration stage (FR-33, ADR-627). Default False
+                   preserves the current text-only pipeline byte-for-byte
+                   (INV-3, FR-33 AC2).
+        max_vlm_slides: Upper bound on rendered+reconstructed slides per
+                   document (FR-34 AC2/AC4, ADR-628). None (default) = no
+                   cap; 0 = zero renders, zero VLM calls.
+        embed_rendered_image: When True, prepends a base64 PNG data-URI to
+                   each reconstructed slide's Markdown fragment (FR-34 AC1,
+                   ADR-628). Default False (Markdown-only output).
+        force_render: Slide indices always routed to the render+VLM path,
+                   overriding the complexity heuristic (FR-33 AC7). Default
+                   empty (no override).
+        force_text: Slide indices always routed to the text path,
+                   overriding the complexity heuristic and force_render
+                   (FR-33 AC7). Default empty (no override).
+        render_dpi: Target DPI forwarded to the slide renderer (FR-30).
+                   Default 150 (ARCH-v020 §3.1).
+        reconstruct_max_workers: Upper bound on concurrent reconstruct()
+                   calls (FR-33, ADR-608 precedent). Default 4.
     """
 
     describer: ImageDescriber | None = None
@@ -93,6 +121,14 @@ class ConvertOptions:
     emit_toc: bool = False
     emit_frontmatter: bool = False
     include_notes: bool = False
+    reconstructor: SlideReconstructor | None = None
+    visual_reconstruct: bool = False
+    max_vlm_slides: int | None = None
+    embed_rendered_image: bool = False
+    force_render: frozenset[int] = frozenset()
+    force_text: frozenset[int] = frozenset()
+    render_dpi: int = 150
+    reconstruct_max_workers: int = 4
 
 
 # ---------------------------------------------------------------------------
@@ -107,8 +143,10 @@ def convert(
 ) -> str:
     """Convert a PPTX file into a single Markdown document (FR-16).
 
-    Orchestrates the M2–M5 pipeline:
-        parse -> enrich_images -> enrich_descriptions -> assemble (-> validate?).
+    Orchestrates the pipeline:
+        parse -> enrich_images -> enrich_descriptions
+              -> reconstruct_slides (opt-in, FR-33)
+              -> assemble (-> validate?).
 
     Args:
         source:  Path to a .pptx file (str or pathlib.Path).
@@ -142,6 +180,19 @@ def convert(
         max_workers=opts.describe_max_workers,
         diagram_mermaid=opts.diagram_mermaid,
     )
+
+    # --- Stage 3.5: hybrid render+VLM reconstruction (opt-in, FR-33) ---
+    if opts.visual_reconstruct:
+        reconstruct_slides(
+            pres,
+            opts.reconstructor,
+            max_slides=opts.max_vlm_slides,
+            force_render=opts.force_render,
+            force_text=opts.force_text,
+            embed=opts.embed_rendered_image,
+            render_dpi=opts.render_dpi,
+            max_workers=opts.reconstruct_max_workers,
+        )
 
     # --- Stage 4: assemble Markdown (masking + FR-28 structured opt-in) ---
     md = assemble_document(
