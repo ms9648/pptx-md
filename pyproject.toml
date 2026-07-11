@@ -30,6 +30,10 @@ vlm = [
     "anthropic>=0.40",
     "openai>=1.0",
 ]
+# FR-30 / ADR-622 (DEC-7 승인): PDF->PNG 래스터화. slide_render.py 지연 import 로 격리.
+render = [
+    "pypdfium2>=4",
+]
 dev = [
     "pytest",
     "pytest-cov",
