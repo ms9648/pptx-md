@@ -30,7 +30,7 @@ from pptx_md.masking import MASK_TOKEN, MaskingOptions
 from pptx_md.providers import get_describer
 from pptx_md.validator import ValidationResult, validate_markdown
 
-__version__: str = "0.1.0"
+__version__: str = "0.1.2"
 
 __all__ = [
     "convert",
