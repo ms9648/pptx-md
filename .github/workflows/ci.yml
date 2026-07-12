@@ -19,11 +19,19 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install (editable + dev extras)
+      # 이슈 #106: soffice->PDF->PNG 통합 스모크(FR-30)가 CI 에서 실제 실행되도록
+      # LibreOffice(headless 변환 가능) 를 설치한다.
+      - name: Install LibreOffice (soffice)
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libreoffice
+          soffice --version
+
+      - name: Install (editable + dev + render extras)
         run: |
           python -m pip install --upgrade pip
           pip install hatch
-          pip install -e .[dev]
+          pip install -e .[dev,render]
 
       - name: Ruff (lint)
         run: ruff check .
