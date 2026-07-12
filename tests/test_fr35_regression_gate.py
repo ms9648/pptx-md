@@ -505,8 +505,15 @@ class TestAc3MockProviderCombinedGolden:
 
 
 def _real_vlm_credentials_available() -> bool:
-    """실 VLM 콜에 쓸 수 있는 자격 증명이 환경에 있는지(둘 중 하나)."""
-    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY"))
+    """실 VLM 콜에 쓸 수 있는 자격 증명이 환경에 있는지.
+
+    이슈 #104(AC1/AC4)는 **실 OpenAI provider(reconstruct_model=gpt-4o)** 를
+    구체적으로 주입해 실행하도록 명시하므로, 이 게이트는 ``OPENAI_API_KEY``
+    하나만 확인한다(``ANTHROPIC_API_KEY`` 만 있고 openai 키가 없는 환경에서
+    이 특정 테스트가 잘못 실행되지 않도록 — 다른 provider 로의 확장은 별도
+    이슈로 다룬다).
+    """
+    return bool(os.environ.get("OPENAI_API_KEY"))
 
 
 class TestAc4RealVlmStructuralInvariant:
@@ -518,23 +525,68 @@ class TestAc4RealVlmStructuralInvariant:
         not slide_render_available() or not _real_vlm_credentials_available(),
         reason=(
             "실 VLM 구조 불변식 테스트는 soffice+pypdfium2(slide_render_available)"
-            " 그리고 VLM API 자격 증명(ANTHROPIC_API_KEY/OPENAI_API_KEY) 이 모두"
-            " 있을 때만 실행된다 — 이 환경/CI 에는 없으므로 skip(FR-35 AC4/AC6)."
+            " 그리고 VLM API 자격 증명(OPENAI_API_KEY) 이 모두 있을 때만"
+            " 실행된다 — 이 환경/CI 에는 없으므로 skip(FR-35 AC4/AC6, 이슈"
+            " #104 AC3). 실행하려면 workflow_dispatch 전용"
+            " .github/workflows/real-vlm-smoke.yml 을 사람 승인 후 트리거한다"
+            "(#104 AC4, 비용 통제)."
         ),
     )
 
     def test_ac4_real_vlm_structural_invariants(self, tmp_path: Path) -> None:
-        """실 soffice 렌더 + 실 VLM 재구성 산출물의 구조 불변식만 검증한다
-        (바이트 골든이 아님 — 비결정성 흡수, AC4). 이 환경에는 자격 증명이
-        없어 항상 skip 되며, VLM/soffice 가 모두 갖춰진 환경에서만 실행된다.
+        """실 soffice 렌더 + 실 OpenAI VLM 재구성 산출물의 구조 불변식만
+        검증한다(바이트 골든이 아님 — 비결정성 흡수, AC4/이슈#104 AC2).
+
+        soffice + OPENAI_API_KEY 가 모두 갖춰진 환경(수동 workflow_dispatch,
+        #104 AC4)에서만 실행되고, 그 외에는 클래스 ``pytestmark`` 로 skip
+        된다(AC6/#104 AC3). 합성 픽스처(fr35_fixtures, #96 AC7 계승 — 사내
+        실증 파일 미사용)의 자연 라우팅(S5/S7/S12 인덱스는 render+VLM 경로,
+        순수 텍스트 인덱스는 텍스트 경로, tests/fr35_fixtures.py 참조)에
+        맡겨 실 gpt-4o 호출을 최소 1회 이상 태운다.
         """
-        pytest.skip(
-            "실 VLM provider 배선은 이 QA 검증 범위 밖(프로파일 §1: 신규 VLM"
-            " 호출/비용 지출은 사람 승인 없이 임의 실행하지 않는다). 자격 증명이"
-            " 있는 CI/로컬에서 실행하려면 anthropic/openai provider 를 주입해"
-            " force_render 로 렌더 경로를 강제한 뒤 validate_markdown(...).valid"
-            " 및 슬라이드 수 보존을 어서션하도록 이 테스트 본문을 채운다."
+        from pptx_md.assembler import _SLIDE_SEPARATOR
+        from pptx_md.errors import InstallationError
+        from pptx_md.providers.openai import OpenAIDescriber
+
+        try:
+            reconstructor = OpenAIDescriber(reconstruct_model="gpt-4o")
+        except InstallationError:
+            pytest.skip(
+                "openai SDK(VLM extras)가 설치되지 않아 실 provider 를 구성할"
+                " 수 없다 — pip install pptx-md[vlm] 필요(#104 AC3 계승)."
+            )
+
+        pptx_path = tmp_path / "fr35_ac4_real_vlm.pptx"
+        build_fr35_synthetic_deck(pptx_path)
+
+        result = convert(
+            pptx_path,
+            options=ConvertOptions(
+                visual_reconstruct=True,
+                reconstructor=reconstructor,
+            ),
         )
+
+        # (a) 유효 Markdown 산출 — 비어있지 않은 실 문서.
+        assert result.strip() != ""
+
+        outcome = validate_markdown(result)
+
+        # (b) validator 경고 0(이슈 #104 AC2, ARCH-v020 §3.7/ADR-629).
+        assert outcome.valid, f"validate_markdown invalid: {outcome.warnings}"
+        assert outcome.warnings == [], f"unexpected warnings: {outcome.warnings}"
+
+        # (c) 슬라이드 수 보존 — 렌더+VLM 실패 시에도 텍스트 폴백으로 슬롯이
+        # 유지되므로(INV-4, slide_reconstruction.py), 합성 픽스처의 4개
+        # 슬라이드 블록이 그대로 보존된다. assemble_document 의 실 구분자를
+        # 그대로 재사용해 이 테스트의 판정과 산출물 실 구조를 결합한다.
+        slide_blocks = result.split(_SLIDE_SEPARATOR)
+        assert len(slide_blocks) == 4
+
+        # (d) 표 정합 — 깨진/열불일치/전공백 표 경고가 전혀 없어야 한다
+        # (validate_markdown 의 FR-29 pipe-table 규칙, 이슈 #104 AC2(d)).
+        broken_table_warnings = [w for w in outcome.warnings if "표" in w]
+        assert broken_table_warnings == []
 
 
 # ---------------------------------------------------------------------------

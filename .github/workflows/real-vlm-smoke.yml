@@ -1,0 +1,53 @@
+name: Real VLM Smoke (manual, cost-gated)
+
+# 이슈 #104 AC4: 실 VLM(OpenAI) 호출은 비용이 발생하므로 상시 CI(ci.yml)에
+# 절대 배선하지 않는다. workflow_dispatch(사람이 명시적으로 트리거)로만
+# 실행되며, FR-35 AC4 구조 불변식 테스트 노드 1개만 실행한다(비용 통제).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  real-vlm-structural-invariants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # AC4 구조 불변식 테스트는 실 soffice 렌더 경로(slide_render_available)
+      # 를 요구한다 — #106 의 ci.yml 배선과 동일한 설치 절차.
+      - name: Install LibreOffice (soffice)
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libreoffice
+          soffice --version
+
+      - name: Install (editable + dev + render + vlm extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev,render,vlm]
+
+      # 시크릿 미설정 시 pytest 의 skipif 로 조용히 넘어가지 않고, 이
+      # 수동/의도적 트리거 워크플로에서는 명확히 fail 시켜 사람에게
+      # 신호를 준다(#104 AC4: "시크릿 미설정 시 명확히 fail 또는 skip").
+      - name: Verify OPENAI_API_KEY secret is configured
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "::error::OPENAI_API_KEY secret is not set — cannot run the real VLM smoke test. Register the secret (Settings > Secrets and variables > Actions) before dispatching this workflow."
+            exit 1
+          fi
+
+      # 해당 AC4 테스트 노드 1개만 실행(비용 통제, #104 AC4). --no-cov 로
+      # pyproject.toml 의 전역 --cov-fail-under=75 게이트를 비활성화한다
+      # (단일 노드 실행은 전체 커버리지를 대표하지 않음).
+      - name: Pytest (FR-35 AC4 real VLM structural invariants only)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          pytest --no-cov -v \
+            "tests/test_fr35_regression_gate.py::TestAc4RealVlmStructuralInvariant::test_ac4_real_vlm_structural_invariants"
