@@ -45,9 +45,19 @@ jobs:
       # 해당 AC4 테스트 노드 1개만 실행(비용 통제, #104 AC4). --no-cov 로
       # pyproject.toml 의 전역 --cov-fail-under=75 게이트를 비활성화한다
       # (단일 노드 실행은 전체 커버리지를 대표하지 않음).
+      #
+      # -s -o log_cli=true --log-cli-level=INFO: reconstruct_slides()
+      # (pptx_md.slide_reconstruction 로거)의 INFO/WARNING 로그와 테스트의
+      # 표-콘텐츠-경고 print() 를 Actions 실행 로그에 그대로 노출시켜, 사람이
+      # 매 트리거마다 (실 VLM 호출 성공 N건 vs 텍스트 폴백 N건)을 직접 확인할
+      # 수 있게 한다(#104 재작업 AC2 진단 가시화). 그 로거는 카운트/인덱스/
+      # sha256 앞 12자/예외타입명만 기록하며 PNG 바이트·프롬프트·재구성 MD
+      # 원문은 절대 로깅하지 않는다(NFR-06, slide_reconstruction.py 기존
+      # 설계 — 이 워크플로 변경은 로그 가시성만 켤 뿐 로깅 내용을 바꾸지
+      # 않는다).
       - name: Pytest (FR-35 AC4 real VLM structural invariants only)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          pytest --no-cov -v \
+          pytest --no-cov -v -s -o log_cli=true --log-cli-level=INFO \
             "tests/test_fr35_regression_gate.py::TestAc4RealVlmStructuralInvariant::test_ac4_real_vlm_structural_invariants"
