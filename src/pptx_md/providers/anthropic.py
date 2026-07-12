@@ -31,7 +31,7 @@ _DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 #: describe()의 저비용 haiku 모델과 **분리된** 별도의 고성능(품질 우선) 모델을
 #: 기본값으로 쓴다. 실값(모델명/토큰 상한)은 사람 승인 전 미고정 — provider
 #: 상수로 노출해 추적성을 확보한다(ARCH-v020 §3.3 "모델·비용 수치 제안" 표).
-_RECONSTRUCT_MODEL = "claude-opus-4-5-20251001"
+_RECONSTRUCT_MODEL = "claude-opus-4-8"
 
 #: 재구성 산출(표/중첩리스트 다량)은 describe(1024)보다 분량이 크므로 상향
 #: (ADR-626 제안).
