@@ -43,7 +43,7 @@ import pytest
 from pptx_md.api import ConvertOptions, convert
 from pptx_md.complexity import complexity_score, is_visually_complex
 from pptx_md.parser import parse_presentation
-from pptx_md.slide_describer import SlideContext
+from pptx_md.slide_describer import SlideContext, SlideReconstructor
 from pptx_md.slide_reconstruction import reconstruct_slides
 from pptx_md.slide_render import slide_render_available
 from pptx_md.validator import validate_markdown
@@ -516,10 +516,63 @@ def _real_vlm_credentials_available() -> bool:
     return bool(os.environ.get("OPENAI_API_KEY"))
 
 
+class _RealVlmCallSpy:
+    """실 :class:`SlideReconstructor` 를 감싸 호출/성공 횟수만 계측한다.
+
+    #104 재작업 AC1(수동 트리거 run 29177441755 사후진단): 이 스파이가
+    필요한 이유는 ``reconstruct_slides()``(``slide_reconstruction.py``)가
+    render/reconstruct 실패를 **절대 예외로 노출하지 않고** 조용히
+    ``reconstructed_md=None`` 텍스트 폴백으로 흡수하기 때문이다(INV-4,
+    docstring line 49-52/271). 즉 인증 실패·쿼터 초과·네트워크 오류가 나도
+    표면 Markdown 산출물만으로는 "VLM이 실제로 호출·성공했는지"를 구분할
+    수 없다 — 조용한 전체 폴백이 마치 정상 산출물처럼 보인다. 이 스파이는
+    동작(반환값)을 전혀 바꾸지 않고 카운트만 옆에서 기록해, 테스트가 두
+    실패 모드(라우팅 안 됨 vs 호출됐지만 전부 실패)를 명확히 구분해
+    보고하도록 한다.
+    """
+
+    def __init__(self, inner: SlideReconstructor) -> None:
+        self._inner = inner
+        self.attempts = 0
+        self.successes = 0
+
+    def reconstruct(
+        self, image_bytes: bytes, image_ext: str, context: SlideContext
+    ) -> str:
+        self.attempts += 1
+        text = self._inner.reconstruct(image_bytes, image_ext, context)
+        if text:
+            self.successes += 1
+        return text
+
+
+# #104 재작업 AC2/AC3: FR-29 표 콘텐츠 경고(_check_pipe_tables)는 이 스모크의
+# 합성 픽스처(tests/fr35_fixtures.py)에 원천 TableShapeIR 가 단 하나도 없다는
+# 사실과 함께 판단한다 — 최종 산출물에 등장하는 모든 pipe table 은 100%
+# gpt-4o 가 이미지를 보고 자유 생성한 창작물이며, "원본 표 데이터를 깨뜨렸다"
+# 는 의미의 결함이 아니다(깨뜨릴 원본 표가 애초에 없다). 반대로 헤딩 계층/
+# 중복 헤딩/제어문자/빈 슬라이드 경고는 우리 코드(assembler/reconstruct 병합
+# 로직)가 만들어내는 구조이므로 VLM 콘텐츠 비결정성과 무관하게 항상 0이어야
+# 한다. 따라서 표 콘텐츠 경고만 관찰(print, 하드실패 대상 아님)로 격하하고
+# 나머지는 여전히 하드 실패로 유지한다(ARCH-v020 §3.7/ADR-629 "비결정 흡수,
+# 바이트골든 아님" 취지 — PM 조정 대상, 임의 무력화 아님).
+_TABLE_CONTENT_WARNING_MARKERS: tuple[str, ...] = (
+    "깨진 표",
+    "표 열 수 불일치",
+    "전공백 표",
+)
+
+
+def _is_table_content_warning(warning: str) -> bool:
+    return any(marker in warning for marker in _TABLE_CONTENT_WARNING_MARKERS)
+
+
 class TestAc4RealVlmStructuralInvariant:
     """실 VLM/실 soffice 산출물은 바이트 골든 대상에서 제외하고, 구조 불변식
-    (유효 Markdown·validator 경고 0·표 정합·슬라이드 수 보존)만 어서션한다
-    (AC4). 렌더(soffice/pypdfium2) 또는 VLM 자격 증명이 없으면 skip(AC6)."""
+    (유효 Markdown·구조 경고 0·슬라이드 수 보존)과 실 VLM 호출/성공 증거를
+    어서션한다(AC4, #104 재작업). 표 콘텐츠 경고는 관찰만 한다(위 마커 상수
+    주석 참조). 렌더(soffice/pypdfium2) 또는 VLM 자격 증명이 없으면
+    skip(AC6)."""
 
     pytestmark = pytest.mark.skipif(
         not slide_render_available() or not _real_vlm_credentials_available(),
@@ -542,19 +595,24 @@ class TestAc4RealVlmStructuralInvariant:
         된다(AC6/#104 AC3). 합성 픽스처(fr35_fixtures, #96 AC7 계승 — 사내
         실증 파일 미사용)의 자연 라우팅(S5/S7/S12 인덱스는 render+VLM 경로,
         순수 텍스트 인덱스는 텍스트 경로, tests/fr35_fixtures.py 참조)에
-        맡겨 실 gpt-4o 호출을 최소 1회 이상 태운다.
+        맡겨 실 gpt-4o 호출을 최소 1회 이상 태운다. ``_RealVlmCallSpy`` 로
+        실 provider 를 감싸 호출/성공 횟수를 계측해, 조용한 전체 텍스트
+        폴백(INV-4)을 표/헤딩 경고와 명확히 구분되는 메시지로 실패시킨다
+        (#104 재작업 AC1).
         """
         from pptx_md.assembler import _SLIDE_SEPARATOR
         from pptx_md.errors import InstallationError
         from pptx_md.providers.openai import OpenAIDescriber
 
         try:
-            reconstructor = OpenAIDescriber(reconstruct_model="gpt-4o")
+            real_reconstructor = OpenAIDescriber(reconstruct_model="gpt-4o")
         except InstallationError:
             pytest.skip(
                 "openai SDK(VLM extras)가 설치되지 않아 실 provider 를 구성할"
                 " 수 없다 — pip install pptx-md[vlm] 필요(#104 AC3 계승)."
             )
+
+        spy = _RealVlmCallSpy(real_reconstructor)
 
         pptx_path = tmp_path / "fr35_ac4_real_vlm.pptx"
         build_fr35_synthetic_deck(pptx_path)
@@ -563,18 +621,59 @@ class TestAc4RealVlmStructuralInvariant:
             pptx_path,
             options=ConvertOptions(
                 visual_reconstruct=True,
-                reconstructor=reconstructor,
+                reconstructor=spy,
             ),
         )
 
         # (a) 유효 Markdown 산출 — 비어있지 않은 실 문서.
         assert result.strip() != ""
 
+        # (a') 실 VLM 호출 증명(#104 재작업 AC1) — validator 단언보다 먼저
+        # 검사해, 실패 시 "표/헤딩 경고"가 아니라 "라우팅 안 됨" 또는
+        # "조용한 전체 폴백"으로 원인이 명확히 구분되게 한다.
+        assert spy.attempts >= 1, (
+            "reconstruct() 가 한 번도 호출되지 않았다 — 합성 픽스처의"
+            " 시각복잡 인덱스(S5/S7/S12, tests/fr35_fixtures.py)가 렌더+VLM"
+            " 경로로 라우팅되지 않았다는 뜻이다. VLM 키/네트워크 문제가"
+            " 아니라 complexity.py/fr35_fixtures.py 회귀를 의심할 것"
+            " (#104 재작업 AC1)."
+        )
+        assert spy.successes >= 1, (
+            f"실 VLM 미호출/전체 폴백 — 키·백엔드 확인 필요"
+            f"(attempts={spy.attempts}, successes=0). reconstruct_slides()는"
+            " render/reconstruct 실패를 절대 예외로 노출하지 않고 조용히"
+            " 텍스트 폴백하므로(INV-4, slide_reconstruction.py) 표면"
+            " Markdown 산출물만으로는 이 실패 모드가 감지되지 않는다"
+            " (#104 재작업 AC1)."
+        )
+
         outcome = validate_markdown(result)
 
-        # (b) validator 경고 0(이슈 #104 AC2, ARCH-v020 §3.7/ADR-629).
+        # (b) 치명적 무효 없음(불변, AC4).
         assert outcome.valid, f"validate_markdown invalid: {outcome.warnings}"
-        assert outcome.warnings == [], f"unexpected warnings: {outcome.warnings}"
+
+        # (b') 구조 경고 0 — 표 콘텐츠 경고(전적으로 VLM 창작 콘텐츠, 위
+        # 주석 참조)만 제외하고 나머지(헤딩 계층/중복 헤딩/제어문자/빈
+        # 슬라이드 등, 전부 우리 코드가 만드는 구조)는 여전히 하드 실패
+        # 대상이다(#104 재작업 AC2/AC3, ARCH-v020 §3.7/ADR-629).
+        structural_warnings = [
+            w for w in outcome.warnings if not _is_table_content_warning(w)
+        ]
+        assert structural_warnings == [], (
+            f"구조 경고 발생(하드실패 대상, 표 콘텐츠 경고 제외):"
+            f" {structural_warnings}"
+        )
+
+        # 표 콘텐츠 경고는 관찰만 한다 — 하드실패시키지 않되, -s 로 워크플로
+        # 로그에 노출되어 사람이 VLM 표 재구성 품질 추세를 볼 수 있게 한다
+        # (#104 재작업 AC2/AC3, NFR-06: 경고 메시지 자체는 표 유무/개수
+        # 판정 결과일 뿐 PNG/프롬프트/재구성 MD 원문이 아니므로 로깅 허용).
+        table_warnings = [w for w in outcome.warnings if _is_table_content_warning(w)]
+        if table_warnings:
+            print(
+                "[FR-35 AC4] 실 VLM 표 재구성 비결정 경고 관찰(하드실패 아님,"
+                f" ARCH-v020 §3.7/ADR-629 비결정 흡수): {table_warnings}"
+            )
 
         # (c) 슬라이드 수 보존 — 렌더+VLM 실패 시에도 텍스트 폴백으로 슬롯이
         # 유지되므로(INV-4, slide_reconstruction.py), 합성 픽스처의 4개
@@ -582,11 +681,6 @@ class TestAc4RealVlmStructuralInvariant:
         # 그대로 재사용해 이 테스트의 판정과 산출물 실 구조를 결합한다.
         slide_blocks = result.split(_SLIDE_SEPARATOR)
         assert len(slide_blocks) == 4
-
-        # (d) 표 정합 — 깨진/열불일치/전공백 표 경고가 전혀 없어야 한다
-        # (validate_markdown 의 FR-29 pipe-table 규칙, 이슈 #104 AC2(d)).
-        broken_table_warnings = [w for w in outcome.warnings if "표" in w]
-        assert broken_table_warnings == []
 
 
 # ---------------------------------------------------------------------------
